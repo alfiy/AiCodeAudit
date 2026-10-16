@@ -803,6 +803,69 @@ def get_selected_result(workspace: Path):
     return results
 
 
+def _render_result_selector(results: list[dict], session_key: str = "selected_result_label") -> dict | None:
+    """以卡片列表形式展示历史分析结果，每条自带查看与删除操作。"""
+    if not results:
+        return None
+
+    # 默认选中最新一条
+    if st.session_state.get(session_key) not in {item["label"] for item in results}:
+        st.session_state[session_key] = results[0]["label"]
+
+    st.markdown("#### 历史分析结果")
+    st.caption("点击「查看」切换当前结果，点击「删除」可移除该次审计记录。")
+
+    pending = st.session_state.get("pending_delete_label")
+
+    for item in results:
+        is_selected = item["label"] == st.session_state.get(session_key)
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([6, 1.2, 1.2])
+            with c1:
+                title = item["label"]
+                if is_selected:
+                    title = f"**{title}**（当前）"
+                st.markdown(title)
+                hash_short = (item.get("project_hash") or "")[:12]
+                st.caption(f"哈希：`{hash_short}`　·　目录：`{Path(item['output_dir']).name}`")
+            with c2:
+                if st.button("查看", key=f"view_{session_key}_{item['label']}", use_container_width=True, disabled=is_selected):
+                    st.session_state[session_key] = item["label"]
+                    st.rerun()
+            with c3:
+                if st.button("删除", key=f"del_{session_key}_{item['label']}", use_container_width=True, type="secondary"):
+                    st.session_state.pending_delete_label = item["label"]
+                    st.rerun()
+
+            # 该条目的删除确认
+            if pending == item["label"]:
+                st.warning("确认永久删除此分析结果？此操作不可恢复。")
+                cy, cn = st.columns(2)
+                with cy:
+                    if st.button("确认删除", key=f"confirm_{session_key}_{item['label']}", type="primary", use_container_width=True):
+                        output_dir = Path(item["output_dir"])
+                        try:
+                            if output_dir.exists():
+                                shutil.rmtree(output_dir, ignore_errors=True)
+                            latest = st.session_state.get("latest_result")
+                            if latest and latest.get("output_dir") == str(output_dir):
+                                st.session_state.latest_result = None
+                            st.session_state.pending_delete_label = None
+                            if st.session_state.get(session_key) == item["label"]:
+                                st.session_state[session_key] = None
+                            st.success("已删除。")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"删除失败：{e}")
+                with cn:
+                    if st.button("取消", key=f"cancel_{session_key}_{item['label']}", use_container_width=True):
+                        st.session_state.pending_delete_label = None
+                        st.rerun()
+
+    selected_label = st.session_state.get(session_key)
+    return next((item for item in results if item["label"] == selected_label), None)
+
+
 def render_result_list_page(workspace: Path):
     render_page_hero(
         "审计结果可视化",
@@ -814,9 +877,12 @@ def render_result_list_page(workspace: Path):
         st.info("还没有可展示的结果，请先在“分析”页面执行一次审计。")
         return
 
-    result_map = {item["label"]: item for item in results}
-    selected_label = st.selectbox("选择一个分析结果", list(result_map.keys()))
-    selected = result_map[selected_label]
+    selected = _render_result_selector(results, session_key="selected_result_label")
+    if not selected:
+        st.info("请从上方列表中选择一个分析结果。")
+        return
+
+    st.divider()
 
     render_stat_strip([
         ("项目哈希", selected["project_hash"][:12]),
@@ -953,9 +1019,12 @@ def render_graph_page(workspace: Path):
         st.info("还没有可展示的图谱，请先在“分析”页面执行一次审计。")
         return
 
-    result_map = {item["label"]: item for item in results}
-    selected_label = st.selectbox("选择一个图谱结果", list(result_map.keys()), key="graph_select")
-    selected = result_map[selected_label]
+    selected = _render_result_selector(results, session_key="selected_graph_label")
+    if not selected:
+        st.info("请从上方列表中选择一个分析结果。")
+        return
+
+    st.divider()
 
     if not os.path.exists(selected["graph_path"]):
         st.warning("当前结果没有可用的 graphml 文件。")
@@ -995,6 +1064,9 @@ def init_session_state():
     st.session_state.setdefault("batch_size", 10)
     st.session_state.setdefault("keep_files", True)
     st.session_state.setdefault("latest_result", None)
+    st.session_state.setdefault("pending_delete_label", None)
+    st.session_state.setdefault("selected_result_label", None)
+    st.session_state.setdefault("selected_graph_label", None)
 
 
 def main():
