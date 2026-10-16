@@ -2,5 +2,5 @@ config.yaml
 output
 __pycache__
 .idea
-config.yaml
 .venv
+演示项目
