@@ -1,0 +1,229 @@
+:root {
+  --bg: #f7f7f5;
+  --paper: #ffffff;
+  --line: #e7e5e4;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --accent: #b45309;
+  --teal: #0f766e;
+  --warn: #b45309;
+  --danger: #b42318;
+  --shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
+}
+
+.stApp {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.main .block-container {
+  max-width: 1180px;
+  padding-top: 1.1rem;
+  padding-bottom: 2.5rem;
+}
+
+section[data-testid="stSidebar"] {
+  background: #fafaf9;
+  border-right: 1px solid var(--line);
+}
+
+section[data-testid="stSidebar"] * {
+  color: var(--text) !important;
+}
+
+div[data-testid="stMetric"] {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.25rem 0.45rem;
+  box-shadow: none;
+}
+
+.hero-panel {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 0 0 0.8rem 0;
+  box-shadow: none;
+  margin-bottom: 0.85rem;
+}
+
+.eyebrow {
+  display: none;
+}
+
+.hero-title {
+  font-size: 1.6rem;
+  line-height: 1.15;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 0.35rem 0;
+}
+
+.hero-copy {
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.55;
+  margin: 0;
+  max-width: 780px;
+}
+
+.surface-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.8rem 0.9rem;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.surface-card.tight {
+  padding: 0.7rem 0.85rem;
+}
+
+.section-kicker {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+
+.section-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.finding-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-left: 2px solid #d6d3d1;
+  border-radius: 10px;
+  padding: 0.7rem 0.8rem 0.15rem 0.8rem;
+  box-shadow: none;
+  margin-bottom: 0.6rem;
+}
+
+.finding-card.high {
+  border-left-color: var(--danger);
+}
+
+.finding-card.medium {
+  border-left-color: var(--warn);
+}
+
+.finding-card.low {
+  border-left-color: var(--teal);
+}
+
+.finding-card.info {
+  border-left-color: #64748b;
+}
+
+.finding-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.65rem;
+}
+
+.finding-title {
+  color: var(--text);
+  font-size: 0.93rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.finding-title.high {
+  color: var(--danger);
+}
+
+.finding-title.medium {
+  color: var(--warn);
+}
+
+.finding-title.low {
+  color: var(--teal);
+}
+
+.finding-title.info {
+  color: #475569;
+}
+
+.finding-meta {
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.field-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 0.2rem;
+}
+
+.field-text {
+  color: var(--text);
+  line-height: 1.6;
+  margin-bottom: 0.65rem;
+  font-size: 0.93rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  background: #fafaf9;
+}
+
+.badge.high { color: var(--danger); }
+.badge.medium { color: var(--warn); }
+.badge.low { color: var(--teal); }
+.badge.info { color: #475569; }
+
+.upload-tip {
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 0;
+}
+
+div[data-testid="stFileUploader"] > section {
+  border-radius: 12px !important;
+  border: 1px dashed #d6d3d1 !important;
+  background: #fcfcfb !important;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+  gap: 0.3rem;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-left: 0;
+  border-right: 0;
+}
+
+.stTabs [data-baseweb="tab"] {
+  border-radius: 0;
+  padding: 0.38rem 0.75rem;
+  color: var(--muted);
+}
+
+.stTabs [aria-selected="true"] {
+  background: transparent;
+  color: var(--text) !important;
+  border-bottom: 2px solid var(--accent);
+}
