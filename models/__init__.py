@@ -21,6 +21,7 @@ class OpenAIConfig(BaseModel):
     model: str
     max_input_tokens: int | None = None
     max_per_tokens: int | None = None
+    max_output_tokens: int = 2048
     request_overhead_tokens: int = 512
     timeout_seconds: float = 60.0
     max_retries: int = 3
@@ -42,6 +43,8 @@ class ProjectConfig(BaseModel):
     agent2_final_payload_dedup_limit: int = 1
     agent2_failure_rate_threshold: float = 0.3
     agent2_candidate_score_threshold: int = 8
+    agent2_max_payloads: int = 0
+    agent2_max_per_file: int = 0
 
 class Config(BaseModel):
     openai: OpenAIConfig

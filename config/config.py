@@ -16,6 +16,7 @@ def create_default_config(file_path):
             'api_key': "sk-BKR5huAmRgTd1qjwP6AWocZXvmgTjJ2UI46uiHi104YT4Jnh",
             'model': 'gpt-4o-mini',
             'max_input_tokens': 8000,
+            'max_output_tokens': 2048,
             'request_overhead_tokens': 512,
             'timeout_seconds': 60,
             'max_retries': 3,

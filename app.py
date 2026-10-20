@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from matplotlib import font_manager
 
 from audit.service import run_audit
@@ -79,7 +78,7 @@ def get_finding_priority(finding_type: str) -> int:
     }.get(badge_class, 4)
 
 
-def get_chinese_font_family() -> str:
+def get_chinese_font_family() -> str | None:
     candidates = [
         "Microsoft YaHei",
         "SimHei",
@@ -87,12 +86,23 @@ def get_chinese_font_family() -> str:
         "Source Han Sans SC",
         "WenQuanYi Zen Hei",
         "Arial Unicode MS",
+        "Noto Sans CJK JP",
+        "Droid Sans Fallback",
     ]
     available_fonts = {font.name for font in font_manager.fontManager.ttflist}
     for candidate in candidates:
         if candidate in available_fonts:
             return candidate
-    return "sans-serif"
+    # 再按文件名探测常见中文字体
+    for font_path in font_manager.findSystemFonts():
+        lower = font_path.lower()
+        if any(key in lower for key in ("noto", "cjk", "wqy", "sourcehan", "simhei", "msyh")):
+            try:
+                font_manager.fontManager.addfont(font_path)
+                return font_manager.FontProperties(fname=font_path).get_name()
+            except Exception:
+                continue
+    return None
 
 
 def ensure_workspace() -> Path:
@@ -180,8 +190,72 @@ def parse_report(report_text: str):
         if structured:
             parsed.extend(structured)
             continue
-        parsed.append(parse_legacy_report_section(section))
+        legacy = parse_legacy_report_section(section)
+        if legacy.get("findings"):
+            parsed.append(legacy)
+            continue
+        recovered = _recover_from_reasoning(section)
+        if recovered:
+            parsed.append(recovered)
     return parsed
+
+
+def _recover_from_reasoning(section: str) -> dict | None:
+    text = section.strip()
+    if not text:
+        return None
+
+    file_path = "未知文件"
+    path_match = re.search(r"(?:路径|文件)[:：]\s*([^\s\n]+)", text)
+    if path_match:
+        file_path = path_match.group(1).strip()
+    else:
+        path_like = re.search(r"(/[\w./\-]+\.(?:php|py|js|java|go|c|cpp|cs))", text)
+        if path_like:
+            file_path = path_like.group(1)
+
+    vuln_type = "可疑风险"
+    for candidate in ("SQL注入", "命令注入", "路径遍历", "任意文件读写", "SSRF", "XXE", "反序列化", "XSS", "任意代码执行", "认证绕过", "敏感信息泄露"):
+        if candidate in text:
+            vuln_type = candidate
+            break
+
+    level = "信息"
+    for candidate in ("高危", "中危", "低危"):
+        if candidate in text:
+            level = candidate
+            break
+
+    verdict = "确认风险" if "确认风险" in text else "可疑风险"
+    feature = ""
+    code_match = re.search(r"(?:代码特征|关键代码)[:：]\s*(.+)", text)
+    if code_match:
+        feature = code_match.group(1).strip()[:500]
+    else:
+        # 取一段较短代码风格行作为证据
+        code_lines = [line.strip() for line in text.splitlines() if any(tok in line for tok in ("=", "->", "fopen", "fwrite", "$_", "exec", "query"))]
+        feature = "\n".join(code_lines[:6])
+
+    return {
+        "file_path": file_path,
+        "findings": [{
+            "type": format_finding_title(vuln_type, verdict, level),
+            "location": "-",
+            "feature": feature or text[:800],
+            "vector": _pick_sentence(text, ("攻击", "可控", "输入")),
+            "impact": _pick_sentence(text, ("影响", "导致", "泄露")),
+            "fix": _pick_sentence(text, ("建议", "修复", "改为")),
+        }],
+        "raw": section,
+    }
+
+
+def _pick_sentence(text: str, keywords: tuple[str, ...]) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and any(key in stripped for key in keywords) and len(stripped) < 200:
+            return stripped
+    return ""
 
 
 def is_pass_finding(finding: dict) -> bool:
@@ -461,7 +535,8 @@ def build_graph_html(graph_path: str) -> str:
 
 def render_graph_fallback(graph: nx.DiGraph):
     font_family = get_chinese_font_family()
-    plt.rcParams["font.sans-serif"] = [font_family]
+    if font_family:
+        plt.rcParams["font.sans-serif"] = [font_family]
     plt.rcParams["axes.unicode_minus"] = False
     sample_nodes = list(graph.nodes())[:120]
     subgraph = graph.subgraph(sample_nodes).copy()
@@ -478,7 +553,8 @@ def render_graph_fallback(graph: nx.DiGraph):
         node_color="#ff8a65",
         edge_color="#94a3b8",
     )
-    ax.set_title("依赖图谱静态预览（前120个节点）", fontsize=14, fontfamily=font_family)
+    title = "依赖图谱静态预览（前120个节点）" if font_family else "Dependency graph preview (first 120 nodes)"
+    ax.set_title(title, fontsize=14, fontfamily=font_family or "DejaVu Sans")
     ax.axis("off")
     st.pyplot(fig, clear_figure=True)
 
@@ -528,7 +604,7 @@ def render_analysis_page(workspace: Path):
         st.info("请上传一个 zip 压缩包。")
         return
 
-    if st.button("开始分析", type="primary", use_container_width=True):
+    if st.button("开始分析", type="primary", width="stretch"):
         zip_path = save_uploaded_zip(uploaded_file, subdirs["uploads"])
 
         try:
@@ -596,11 +672,11 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
                 hash_short = (item.get("project_hash") or "")[:12]
                 st.caption(f"哈希：`{hash_short}`　·　目录：`{Path(item['output_dir']).name}`")
             with c2:
-                if st.button("查看", key=f"view_{session_key}_{item['label']}", use_container_width=True, disabled=is_selected):
+                if st.button("查看", key=f"view_{session_key}_{item['label']}", width="stretch", disabled=is_selected):
                     st.session_state[session_key] = item["label"]
                     st.rerun()
             with c3:
-                if st.button("删除", key=f"del_{session_key}_{item['label']}", use_container_width=True, type="secondary"):
+                if st.button("删除", key=f"del_{session_key}_{item['label']}", width="stretch", type="secondary"):
                     st.session_state.pending_delete_label = item["label"]
                     st.rerun()
 
@@ -609,7 +685,7 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
                 st.warning("确认永久删除此分析结果？此操作不可恢复。")
                 cy, cn = st.columns(2)
                 with cy:
-                    if st.button("确认删除", key=f"confirm_{session_key}_{item['label']}", type="primary", use_container_width=True):
+                    if st.button("确认删除", key=f"confirm_{session_key}_{item['label']}", type="primary", width="stretch"):
                         output_dir = Path(item["output_dir"])
                         try:
                             if output_dir.exists():
@@ -625,7 +701,7 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
                         except Exception as e:
                             st.error(f"删除失败：{e}")
                 with cn:
-                    if st.button("取消", key=f"cancel_{session_key}_{item['label']}", use_container_width=True):
+                    if st.button("取消", key=f"cancel_{session_key}_{item['label']}", width="stretch"):
                         st.session_state.pending_delete_label = None
                         st.rerun()
 
@@ -807,7 +883,9 @@ def render_graph_page(workspace: Path):
     graph_tab, static_tab, node_tab, edge_tab = st.tabs(["交互图谱", "静态预览", "节点列表", "边列表"])
 
     with graph_tab:
-        components.html(build_graph_html(selected["graph_path"]), height=820, scrolling=False)
+        html_path = Path(selected["output_dir"]) / "_graph_preview.html"
+        html_path.write_text(build_graph_html(selected["graph_path"]), encoding="utf-8")
+        st.iframe(html_path, height=820)
 
     with static_tab:
         render_graph_fallback(graph)
@@ -820,11 +898,11 @@ def render_graph_page(workspace: Path):
                 node_df.astype(str).apply(lambda col: col.str.lower().str.contains(search_text, na=False))
                 .any(axis=1)
             ]
-        st.dataframe(node_df, use_container_width=True, height=520)
+        st.dataframe(node_df, width="stretch", height=520)
 
     with edge_tab:
         edge_df = build_edge_dataframe(graph)
-        st.dataframe(edge_df, use_container_width=True, height=520)
+        st.dataframe(edge_df, width="stretch", height=520)
 
 
 def init_session_state():

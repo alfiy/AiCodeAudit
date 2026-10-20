@@ -314,13 +314,20 @@ def _format_node(index, node_data):
 
 
 def _node_priority(graph, node) -> int:
+    cache = getattr(graph, "_node_priority_cache", None)
+    if cache is None:
+        cache = {}
+        graph._node_priority_cache = cache
+    if node in cache:
+        return cache[node]
+
     node_data = graph.nodes[node]
     hints = extract_security_hints(node_data)
     has_input = int(bool(hints["input_sources"]))
     has_sink = int(bool(hints["dangerous_sinks"]))
     has_validation = int(bool(hints["validation_signals"]))
     has_safety = int(bool(hints["safety_signals"]))
-    return (
+    score = (
         has_input * 120
         + has_sink * 160
         + has_validation * 70
@@ -330,6 +337,8 @@ def _node_priority(graph, node) -> int:
         + graph.out_degree(node)
         + max(1, len(str(node_data.get("source_code", "")).splitlines()))
     )
+    cache[node] = score
+    return score
 
 
 def _path_hint_summary(graph, path) -> dict[str, int]:
@@ -558,11 +567,15 @@ def build_dependency_tree(graph, root_node, max_depth=2, max_nodes=12, max_branc
 
 
 def get_global_ranked_dependency_trees(graph, max_depth=2, max_nodes=12, max_trees=60):
+    from loguru import logger
+    nodes_with_code = [n for n in graph.nodes if graph.nodes[n].get("source_code")]
+    total = len(nodes_with_code)
+    logger.info("全局依赖树计算：共 {} 个带源码节点（全量构建，避免漏审）", total)
+
     tree_candidates = []
-    for node in graph.nodes:
-        node_data = graph.nodes[node]
-        if not node_data.get("source_code"):
-            continue
+    for idx, node in enumerate(nodes_with_code, 1):
+        if idx % 20 == 0 or idx == total:
+            logger.info("依赖树构建进度: {}/{}", idx, total)
         tree = build_dependency_tree(
             graph,
             node,

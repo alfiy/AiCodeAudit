@@ -183,6 +183,15 @@ async def chat_completion_text(text: str, prompt: str):
     return await chat_completion_messages(messages)
 
 
+def _extract_structured_report(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"<审计报告>.*?</审计报告>", text, re.DOTALL)
+    if match:
+        return match.group(0).strip()
+    return ""
+
+
 async def chat_completion_messages(messages) -> str:
     last_error = None
     max_input_tokens = get_effective_max_input_tokens()
@@ -196,18 +205,50 @@ async def chat_completion_messages(messages) -> str:
                 max_input_tokens,
             )
         )
+    logger.info("发起模型请求，约 {} tokens，模型 {}", current_tokens, C.openai.model)
     for attempt in range(1, C.openai.max_retries + 1):
         try:
             async with get_llm_semaphore():
                 response = await llm.chat.completions.create(
                     model=C.openai.model,
                     messages=messages,
+                    max_tokens=getattr(C.openai, "max_output_tokens", 2048),
+                    temperature=0.1,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
                 )
-            if response.choices and response.choices[0].message.content:
-                return response.choices[0].message.content
+            if response.choices:
+                choice = response.choices[0]
+                message = choice.message
+                content = (getattr(message, "content", None) or "").strip()
+                reasoning = (getattr(message, "reasoning_content", None) or "").strip()
+                finish_reason = getattr(choice, "finish_reason", None)
+
+                # 优先使用正式 content；若只有推理文本，尽量抽出其中的结构化报告
+                final_text = content
+                source = "content"
+                if not final_text and reasoning:
+                    structured = _extract_structured_report(reasoning)
+                    final_text = structured or reasoning
+                    source = "structured_from_reasoning" if structured else "reasoning_content"
+                if final_text:
+                    logger.info(
+                        "模型请求成功，输入约 {} tokens，输出来源={}，长度={}，finish_reason={}",
+                        current_tokens,
+                        source,
+                        len(final_text),
+                        finish_reason,
+                    )
+                    return final_text
+
+                logger.warning(
+                    "模型返回空内容，finish_reason={}，choice={}",
+                    finish_reason,
+                    choice,
+                )
             raise RuntimeError("No response from OpenAI")
         except Exception as exc:
             last_error = exc
+            logger.warning("模型请求失败 (尝试 {}/{}): {}", attempt, C.openai.max_retries, exc)
             if attempt >= C.openai.max_retries:
                 break
             backoff = C.openai.retry_backoff_seconds * attempt
