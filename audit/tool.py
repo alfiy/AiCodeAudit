@@ -399,6 +399,8 @@ def _collect_directed_paths(graph, center_node, max_depth=2, reverse=False):
             continue
 
         neighbors = list(traversal_graph.successors(current))
+        if len(neighbors) > 40:
+            neighbors = neighbors[:40]
         neighbors.sort(key=lambda node: (-_node_priority(graph, node), str(node)))
         for neighbor in neighbors:
             next_depth = depth + 1
@@ -570,12 +572,45 @@ def get_global_ranked_dependency_trees(graph, max_depth=2, max_nodes=12, max_tre
     from loguru import logger
     nodes_with_code = [n for n in graph.nodes if graph.nodes[n].get("source_code")]
     total = len(nodes_with_code)
-    logger.info("全局依赖树计算：共 {} 个带源码节点（全量构建，避免漏审）", total)
+    logger.info("全局依赖树计算：共 {} 个带源码节点", total)
+
+    # 大项目先做廉价预评分，只对有安全信号或高分节点建完整树
+    build_limit = int(getattr(C.project, "agent2_tree_build_limit", 0))
+    if build_limit <= 0:
+        build_limit = 600 if total > 800 else total
+
+    if total > build_limit:
+        scored = []
+        for idx, node in enumerate(nodes_with_code, 1):
+            if idx % 500 == 0:
+                logger.info("节点预评分进度: {}/{}", idx, total)
+            priority = _node_priority(graph, node)
+            scored.append((priority, node))
+        scored.sort(key=lambda item: (-item[0], str(item[1])))
+        # 优先保留有输入源或危险点的节点
+        preferred = []
+        others = []
+        for priority, node in scored:
+            hints = extract_security_hints(graph.nodes[node])
+            if hints["input_sources"] or hints["dangerous_sinks"]:
+                preferred.append(node)
+            else:
+                others.append(node)
+        candidates = (preferred + others)[:build_limit]
+        logger.info(
+            "大项目优化：从 {} 个节点中选出 {} 个建树（含安全信号 {} 个）",
+            total,
+            len(candidates),
+            len(preferred),
+        )
+    else:
+        candidates = nodes_with_code
+        logger.info("节点数未超阈值，全量构建依赖树")
 
     tree_candidates = []
-    for idx, node in enumerate(nodes_with_code, 1):
-        if idx % 20 == 0 or idx == total:
-            logger.info("依赖树构建进度: {}/{}", idx, total)
+    for idx, node in enumerate(candidates, 1):
+        if idx % 20 == 0 or idx == len(candidates):
+            logger.info("依赖树构建进度: {}/{}", idx, len(candidates))
         tree = build_dependency_tree(
             graph,
             node,
@@ -606,7 +641,33 @@ def get_global_ranked_dependency_trees(graph, max_depth=2, max_nodes=12, max_tre
             str(tree["root"]),
         )
     )
-    return deduped_trees[:max_trees]
+    selected = _select_trees_by_file(graph, deduped_trees, max_trees)
+    logger.info("依赖树排序完成，候选 {} 棵，按文件均衡保留 {} 棵", len(deduped_trees), len(selected))
+    return selected
+
+
+def _select_trees_by_file(graph, trees, max_trees):
+    if max_trees <= 0 or len(trees) <= max_trees:
+        return trees
+    selected = []
+    deferred = []
+    file_counts = {}
+    per_file = 2
+    for tree in trees:
+        path = str(graph.nodes[tree["root"]].get("path") or tree["root"])
+        count = file_counts.get(path, 0)
+        if count >= per_file:
+            deferred.append(tree)
+            continue
+        selected.append(tree)
+        file_counts[path] = count + 1
+        if len(selected) >= max_trees:
+            return selected
+    for tree in deferred:
+        if len(selected) >= max_trees:
+            break
+        selected.append(tree)
+    return selected
 
 
 def _format_path_chain(index, graph, chain_type, path):
@@ -683,16 +744,28 @@ def _format_dependency_tree_summary(graph, tree, ranked_paths=None):
 
 
 def gen_text_from_dependency_tree(graph, tree):
-    max_focus_paths = max(1, getattr(C.project, "dependency_context_max_focus_paths", 6))
-    ranked_paths = get_ranked_audit_paths(
-        graph,
-        tree["root"],
-        max_depth=max(2, len(tree.get("branches", []))),
-        max_paths=min(max_focus_paths, max(3, len(tree.get("branches", [])))),
-    )
+    root = tree["root"]
+    root_data = graph.nodes[root]
+    root_code = str(root_data.get("source_code") or "")
+    degree = graph.in_degree(root) + graph.out_degree(root)
+    # 大文件或高连接节点不再二次搜路径，直接用已建好的树分支
+    if len(root_code) > 12000 or degree > 30:
+        ranked_paths = []
+    else:
+        max_focus_paths = max(1, getattr(C.project, "dependency_context_max_focus_paths", 6))
+        ranked_paths = get_ranked_audit_paths(
+            graph,
+            root,
+            max_depth=min(2, max(1, C.project.audit_context_depth)),
+            max_paths=min(max_focus_paths, 4),
+        )
     text_list = [_format_dependency_tree_summary(graph, tree, ranked_paths=ranked_paths)]
     for index, node in enumerate(tree["nodes"]):
-        text_list.append(_format_node(index, graph.nodes[node]))
+        node_data = dict(graph.nodes[node])
+        source = str(node_data.get("source_code") or "")
+        if len(source) > 6000:
+            node_data["source_code"] = source[:6000] + "\n/* ...源码已截断... */"
+        text_list.append(_format_node(index, node_data))
     return "\n".join(text_list)
 
 
@@ -722,6 +795,8 @@ def get_local_subgraph_nodes(graph, center_node, max_depth=2, max_nodes=12):
             continue
 
         neighbors = list(graph.predecessors(current)) + list(graph.successors(current))
+        if len(neighbors) > 40:
+            neighbors = neighbors[:40]
         neighbors.sort(key=lambda node: (-_node_priority(graph, node), str(node)))
         for neighbor in neighbors:
             if neighbor in visited:

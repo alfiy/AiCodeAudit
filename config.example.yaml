@@ -173,3 +173,27 @@ project:
   # 值越大，送入 Agent_2 的节点越少，速度更快但可能漏掉边缘风险
   # 值越小，覆盖更广但噪音更多
   agent2_candidate_score_threshold: 4
+
+  # 大项目建完整依赖树前的候选上限
+  # 0 表示自动：节点超过 800 时只对前 600 个高价值节点建树
+  agent2_tree_build_limit: 0
+
+  # 最终保留的依赖树数量
+  # 0 表示按项目规模自动取 80～160，并按文件均衡
+  agent2_max_trees: 0
+
+  # 做完整局部上下文适配的高分节点数
+  # 0 表示不限制
+  agent2_full_fit_limit: 80
+
+  # 轻量单节点审计上限
+  # 0 表示不限制
+  agent2_light_fit_limit: 200
+
+  # 送入模型的最终任务数上限
+  # 0 表示不截断
+  agent2_max_payloads: 0
+
+  # 单文件任务上限，仅在设置了最终任务数上限时生效
+  # 0 表示不限制单文件
+  agent2_max_per_file: 0

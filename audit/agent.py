@@ -24,6 +24,16 @@ llm = AsyncOpenAI(
     api_key=C.openai.api_key,
     timeout=C.openai.timeout_seconds,
 )
+
+
+def refresh_llm_client():
+    global llm
+    llm = AsyncOpenAI(
+        base_url=C.openai.base_url,
+        api_key=C.openai.api_key,
+        timeout=C.openai.timeout_seconds,
+    )
+    _loop_semaphores.clear()
 _loop_semaphores = {}
 _retry_warning_state = {}
 _RETRY_WARNING_WINDOW_SECONDS = 3.0

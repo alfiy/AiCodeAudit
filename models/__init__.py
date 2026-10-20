@@ -45,6 +45,10 @@ class ProjectConfig(BaseModel):
     agent2_candidate_score_threshold: int = 8
     agent2_max_payloads: int = 0
     agent2_max_per_file: int = 0
+    agent2_max_trees: int = 0
+    agent2_full_fit_limit: int = 80
+    agent2_tree_build_limit: int = 0
+    agent2_light_fit_limit: int = 200
 
 class Config(BaseModel):
     openai: OpenAIConfig

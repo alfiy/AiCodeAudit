@@ -43,6 +43,12 @@ def create_default_config(file_path):
             "agent2_final_payload_dedup_limit": 1,
             "agent2_failure_rate_threshold": 0.3,
             "agent2_candidate_score_threshold": 8,
+            "agent2_max_payloads": 0,
+            "agent2_max_per_file": 0,
+            "agent2_max_trees": 0,
+            "agent2_full_fit_limit": 80,
+            "agent2_tree_build_limit": 0,
+            "agent2_light_fit_limit": 200,
         }
     }
     with open(file_path, 'w', encoding='utf-8') as file:

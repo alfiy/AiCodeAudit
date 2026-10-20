@@ -110,8 +110,37 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return text[:half] + "\n\n...[源码过长，已截断中间部分]...\n\n" + text[-half:]
 
 
+def _is_low_value_bundle_node(node: str, node_data: dict) -> bool:
+    path = str(node_data.get("path") or node).replace("\\", "/").lower()
+    name = str(node_data.get("source_name") or node.rsplit("|", 1)[-1])
+    bundle_markers = (
+        "/public/js/app.js",
+        "/public/js/vendor",
+        ".min.js",
+        "/dist/",
+        "/third-party/",
+        "/node_modules/",
+        "/bower_components/",
+    )
+    if any(marker in path for marker in bundle_markers):
+        return True
+    # 压缩后的短函数名，通常来自打包产物
+    if path.endswith(".js") and len(name) <= 2 and name.isidentifier():
+        return True
+    return False
+
+
 def _fit_agent_2_tree_payload(graph: nx.DiGraph, tree: dict):
+    root = tree["root"]
+    root_code = str(graph.nodes[root].get("source_code") or "")
+    degree = graph.in_degree(root) + graph.out_degree(root)
+    if len(root_code) > 20000 or degree > 80:
+        logger.info("跳过超大或高连接依赖树适配: {}", root)
+        return None, None
+
     payload = gen_text_from_dependency_tree(graph, tree)
+    if len(payload) > 80000:
+        payload = payload[:80000]
     extensions = _collect_payload_extensions(graph, tree["nodes"])
     prompt = build_agent_2_prompt(extensions)
     message_tokens = _estimate_message_tokens(prompt, payload)
@@ -119,18 +148,11 @@ def _fit_agent_2_tree_payload(graph: nx.DiGraph, tree: dict):
     if max_input_tokens is None or message_tokens <= max_input_tokens:
         return payload, message_tokens
 
-    # 截断回退：对树中节点源码做渐进截断
-    for ratio in (0.6, 0.35, 0.2, 0.1):
-        truncated_payload = payload
-        for node in tree["nodes"]:
-            original = str(graph.nodes[node].get("source_code") or "")
-            if not original:
-                continue
-            truncated = _truncate_text(original, max(500, int(len(original) * ratio)))
-            truncated_payload = truncated_payload.replace(original, truncated, 1)
-        message_tokens = _estimate_message_tokens(prompt, truncated_payload)
-        if max_input_tokens is None or message_tokens <= max_input_tokens:
-            return truncated_payload, message_tokens
+    # 超限时直接截断一次，不再对大文本做多次 replace
+    truncated_payload = payload[: max(4000, len(payload) // 3)]
+    message_tokens = _estimate_message_tokens(prompt, truncated_payload)
+    if max_input_tokens is None or message_tokens <= max_input_tokens:
+        return truncated_payload, message_tokens
     return None, None
 
 
@@ -168,24 +190,26 @@ def _tree_candidate_score(graph: nx.DiGraph, tree: dict) -> int:
 
 
 def _candidate_precheck_score(graph: nx.DiGraph, node: str) -> tuple[int, dict]:
+    # 预筛只看节点自身线索和度数，不做局部子图遍历。
+    # 局部遍历在高连接第三方库节点上会极慢，不适合作为全图扫描。
     node_data = graph.nodes[node]
     profile = get_security_hint_profile(node_data)
-    local_summary = get_local_security_summary(
-        graph,
-        node,
-        max_depth=max(1, C.project.audit_context_depth),
-        max_nodes=max(1, C.project.max_audit_nodes),
-    )
+    degree = graph.in_degree(node) + graph.out_degree(node)
     score = (
         profile["input_count"] * 8
         + profile["sink_count"] * 10
         + profile["validation_count"] * 3
         + profile["safety_count"] * 2
-        + local_summary["input_nodes"] * 4
-        + local_summary["sink_nodes"] * 5
-        + local_summary["combined_risk_nodes"] * 12
-        + min(6, graph.in_degree(node) + graph.out_degree(node))
+        + min(20, degree)
     )
+    local_summary = {
+        "input_nodes": int(profile["has_input"]),
+        "sink_nodes": int(profile["has_sink"]),
+        "validation_nodes": int(profile["has_validation"]),
+        "safety_nodes": int(profile["has_safety"]),
+        "combined_risk_nodes": int(profile["has_input"] and profile["has_sink"]),
+        "local_nodes": [node],
+    }
     return score, {"profile": profile, "local_summary": local_summary}
 
 
@@ -204,6 +228,69 @@ def _is_high_value_audit_candidate(graph: nx.DiGraph, node: str) -> tuple[bool, 
         or (local_summary["input_nodes"] > 0 and local_summary["sink_nodes"] > 0)
     )
     return has_direct_signal or has_local_risk_chain or score >= threshold, score
+
+
+def _fit_light_payload(graph: nx.DiGraph, center_node: str):
+    node_data = dict(graph.nodes[center_node])
+    original = str(node_data.get("source_code") or "")
+    if len(original) > 8000:
+        node_data["source_code"] = _truncate_text(original, 4000)
+    payload = _format_node(0, node_data)
+    extensions = _collect_payload_extensions(graph, [center_node])
+    prompt = build_agent_2_prompt(extensions)
+    message_tokens = _estimate_message_tokens(prompt, payload)
+    max_input_tokens = get_effective_max_input_tokens()
+    if max_input_tokens is None or message_tokens <= max_input_tokens:
+        return payload, [center_node], message_tokens
+    return _fit_truncated_only(graph, center_node, node_data, str(node_data.get("source_code") or ""))
+
+
+def _append_node_payload(
+    payload_candidates,
+    payload_signature_counts,
+    context_signature_counts,
+    node_dedup_limit,
+    graph,
+    node,
+    node_data,
+    payload,
+    local_nodes,
+    message_tokens,
+    prescreen_score,
+):
+    payload_signature = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    payload_kept_count = payload_signature_counts.get(payload_signature, 0)
+    if node_dedup_limit >= 0 and payload_kept_count >= max(1, node_dedup_limit):
+        return
+
+    center_signature = hashlib.sha256(
+        "||".join([
+            node_data.get("path", ""),
+            node_data.get("source_name", ""),
+            node_data.get("target_name", ""),
+            node_data.get("desc", ""),
+            node_data.get("source_code", ""),
+            ",".join(sorted(local_nodes)),
+        ]).encode("utf-8")
+    ).hexdigest()
+    context_kept_count = context_signature_counts.get(center_signature, 0)
+    if node_dedup_limit >= 0 and context_kept_count >= max(1, node_dedup_limit):
+        return
+
+    payload_signature_counts[payload_signature] = payload_kept_count + 1
+    context_signature_counts[center_signature] = context_kept_count + 1
+    payload_candidates.append({
+        "payload": payload,
+        "score": (
+            security_hint_score(node_data) * 5
+            + graph.in_degree(node)
+            + graph.out_degree(node)
+            + len(local_nodes) * 2
+            + max(1, len(node_data.get("source_code", "").splitlines()))
+            + prescreen_score
+        ),
+        "tokens": message_tokens if message_tokens is not None else count_text_tokens(payload),
+    })
 
 
 def _fit_agent_2_payload(graph: nx.DiGraph, center_node: str):
@@ -313,17 +400,27 @@ def build_audit_payloads(graph: nx.DiGraph) -> List[str]:
     logger.info("Agent_2 开始构建审计任务，图节点数: {}", total_nodes)
 
     logger.info("正在计算全局依赖树...")
+    configured_max_trees = int(getattr(C.project, "agent2_max_trees", 0))
+    # 0 表示按规模自动放宽，不再写死 30
+    auto_max_trees = max(80, min(total_nodes, 160))
+    max_trees = configured_max_trees if configured_max_trees > 0 else auto_max_trees
     ranked_trees = get_global_ranked_dependency_trees(
         graph,
         max_depth=max(1, C.project.audit_context_depth),
         max_nodes=max(1, C.project.max_audit_nodes),
-        max_trees=max(30, C.project.max_audit_nodes * 3),
+        max_trees=max_trees,
     )
     logger.info("依赖树计算完成，共 {} 棵，开始筛选与适配...", len(ranked_trees))
+    skipped_bundle_count = 0
 
     for tree_idx, tree in enumerate(ranked_trees, 1):
-        logger.info("依赖树处理进度: {}/{}，根节点: {}", tree_idx, len(ranked_trees), tree["root"])
         root_data = graph.nodes[tree["root"]]
+        if _is_low_value_bundle_node(tree["root"], root_data):
+            skipped_bundle_count += 1
+            if skipped_bundle_count <= 5 or skipped_bundle_count % 20 == 0:
+                logger.info("跳过打包/压缩产物依赖树: {}", tree["root"])
+            continue
+        logger.info("依赖树处理进度: {}/{}，根节点: {}", tree_idx, len(ranked_trees), tree["root"])
         is_candidate, prescreen_score = _is_high_value_audit_candidate(graph, tree["root"])
         if not prescreen_disabled and not is_candidate:
             continue
@@ -341,70 +438,83 @@ def build_audit_payloads(graph: nx.DiGraph) -> List[str]:
             "tokens": message_tokens if message_tokens is not None else count_text_tokens(payload),
             "root": root_data.get("source_name", tree["root"]),
         })
+    logger.info("依赖树适配完成，跳过打包产物 {} 棵，保留 {} 棵", skipped_bundle_count, len(tree_payload_candidates))
 
     logger.info("开始逐节点快速预筛...")
     nodes_with_code = [n for n in graph.nodes if graph.nodes[n].get("source_code")]
     scored_nodes = []
     for node_idx, node in enumerate(nodes_with_code, 1):
-        if node_idx % 20 == 0 or node_idx == len(nodes_with_code):
-            logger.info("快速预筛进度: {}/{}", node_idx, len(nodes_with_code))
+        if node_idx % 200 == 0 or node_idx == len(nodes_with_code):
+            logger.info("快速预筛进度: {}/{}，当前: {}", node_idx, len(nodes_with_code), node)
         is_candidate, prescreen_score = _is_high_value_audit_candidate(graph, node)
         scored_nodes.append((node, prescreen_score, is_candidate))
         if not prescreen_disabled and not is_candidate:
             skipped_prescreen_count += 1
 
-    # 只对高分节点做昂贵的上下文适配，避免大图卡住
-    max_fit_nodes = max(50, min(200, len(nodes_with_code) // 5 or 50))
+    full_fit_limit = int(getattr(C.project, "agent2_full_fit_limit", 80))
+    light_fit_limit = int(getattr(C.project, "agent2_light_fit_limit", 200))
     candidates_to_fit = [
         (node, score) for node, score, is_cand in scored_nodes
         if prescreen_disabled or is_cand
     ]
     candidates_to_fit.sort(key=lambda x: -x[1])
-    candidates_to_fit = candidates_to_fit[:max_fit_nodes]
-    logger.info("预筛完成，将对 {} 个高分节点进行上下文适配（上限 {}）", len(candidates_to_fit), max_fit_nodes)
+    full_fit = candidates_to_fit[:full_fit_limit] if full_fit_limit > 0 else candidates_to_fit
+    remaining = candidates_to_fit[len(full_fit):]
+    light_fit = remaining[:light_fit_limit] if light_fit_limit > 0 else remaining
+    logger.info(
+        "预筛完成，完整上下文 {} 个，轻量审计 {} 个（候选共 {}）",
+        len(full_fit),
+        len(light_fit),
+        len(candidates_to_fit),
+    )
 
-    for fit_idx, (node, prescreen_score) in enumerate(candidates_to_fit, 1):
-        if fit_idx % 5 == 0 or fit_idx == len(candidates_to_fit):
-            logger.info("上下文适配进度: {}/{}", fit_idx, len(candidates_to_fit))
+    for fit_idx, (node, prescreen_score) in enumerate(full_fit, 1):
+        if fit_idx % 5 == 0 or fit_idx == len(full_fit):
+            logger.info("完整上下文适配进度: {}/{}", fit_idx, len(full_fit))
         node_data = graph.nodes[node]
+        if _is_low_value_bundle_node(node, node_data):
+            continue
         payload, local_nodes, message_tokens = _fit_agent_2_payload(graph, node)
         if not payload:
             skipped_oversize_count += 1
             logger.warning("Agent_2 上下文与截断回退均无法适配模型限制，已跳过节点: {}", node)
             continue
-        payload_signature = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        payload_kept_count = payload_signature_counts.get(payload_signature, 0)
-        if node_dedup_limit >= 0 and payload_kept_count >= max(1, node_dedup_limit):
-            continue
+        _append_node_payload(
+            payload_candidates,
+            payload_signature_counts,
+            context_signature_counts,
+            node_dedup_limit,
+            graph,
+            node,
+            node_data,
+            payload,
+            local_nodes,
+            message_tokens,
+            prescreen_score,
+        )
 
-        center_signature = hashlib.sha256(
-            "||".join([
-                node_data.get("path", ""),
-                node_data.get("source_name", ""),
-                node_data.get("target_name", ""),
-                node_data.get("desc", ""),
-                node_data.get("source_code", ""),
-                ",".join(sorted(local_nodes)),
-            ]).encode("utf-8")
-        ).hexdigest()
-        context_kept_count = context_signature_counts.get(center_signature, 0)
-        if node_dedup_limit >= 0 and context_kept_count >= max(1, node_dedup_limit):
+    for fit_idx, (node, prescreen_score) in enumerate(light_fit, 1):
+        if fit_idx % 20 == 0 or fit_idx == len(light_fit):
+            logger.info("轻量审计进度: {}/{}", fit_idx, len(light_fit))
+        node_data = graph.nodes[node]
+        if _is_low_value_bundle_node(node, node_data):
             continue
-
-        payload_signature_counts[payload_signature] = payload_kept_count + 1
-        context_signature_counts[center_signature] = context_kept_count + 1
-        payload_candidates.append({
-            "payload": payload,
-            "score": (
-                security_hint_score(node_data) * 5 +
-                graph.in_degree(node) +
-                graph.out_degree(node) +
-                len(local_nodes) * 2 +
-                max(1, len(node_data.get("source_code", "").splitlines())) +
-                prescreen_score
-            ),
-            "tokens": message_tokens if message_tokens is not None else count_text_tokens(payload),
-        })
+        payload, local_nodes, message_tokens = _fit_light_payload(graph, node)
+        if not payload:
+            continue
+        _append_node_payload(
+            payload_candidates,
+            payload_signature_counts,
+            context_signature_counts,
+            node_dedup_limit,
+            graph,
+            node,
+            node_data,
+            payload,
+            local_nodes,
+            message_tokens,
+            prescreen_score,
+        )
 
     # 兼容后续放宽逻辑使用的变量
     prescreened_nodes = scored_nodes

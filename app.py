@@ -10,9 +10,12 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
 import streamlit as st
+import yaml
 from matplotlib import font_manager
 
+from audit.agent import refresh_llm_client
 from audit.service import run_audit
+from config import C
 
 
 st.set_page_config(
@@ -905,6 +908,205 @@ def render_graph_page(workspace: Path):
         st.dataframe(edge_df, width="stretch", height=520)
 
 
+def _cfg_int(name: str, default: int) -> int:
+    return int(getattr(C.project, name, default))
+
+
+def _cfg_openai(name: str, default):
+    return getattr(C.openai, name, default)
+
+
+def _update_yaml_scalar(text: str, section: str, key: str, value) -> str:
+    """只替换已有标量，尽量保留注释和格式。"""
+    lines = text.splitlines()
+    in_section = False
+    section_indent = None
+    key_pattern = re.compile(rf"^(\s*){re.escape(key)}\s*:")
+    rendered = yaml.safe_dump({key: value}, allow_unicode=True, sort_keys=False).strip().split(":", 1)[1].strip()
+    replaced = False
+    for idx, line in enumerate(lines):
+        if re.match(rf"^{re.escape(section)}\s*:", line):
+            in_section = True
+            section_indent = len(line) - len(line.lstrip(" "))
+            continue
+        if in_section and line.strip() and not line.strip().startswith("#"):
+            indent = len(line) - len(line.lstrip(" "))
+            if section_indent is not None and indent <= section_indent:
+                in_section = False
+        if in_section:
+            match = key_pattern.match(line)
+            if match:
+                lines[idx] = f"{match.group(1)}{key}: {rendered}"
+                replaced = True
+                break
+    if not replaced:
+        insert_at = len(lines)
+        for idx, line in enumerate(lines):
+            if re.match(rf"^{re.escape(section)}\s*:", line):
+                insert_at = idx + 1
+                break
+        lines.insert(insert_at, f"  {key}: {rendered}")
+    return "\n".join(lines) + "\n"
+
+
+def _save_settings(project_values: dict, openai_values: dict):
+    config_path = Path("config.yaml")
+    if config_path.exists():
+        text = config_path.read_text(encoding="utf-8")
+    else:
+        text = "openai:\nproject:\n"
+    for key, value in openai_values.items():
+        text = _update_yaml_scalar(text, "openai", key, value)
+        try:
+            setattr(C.openai, key, value)
+        except (ValueError, AttributeError):
+            pass
+    for key, value in project_values.items():
+        text = _update_yaml_scalar(text, "project", key, value)
+        try:
+            setattr(C.project, key, value)
+        except (ValueError, AttributeError):
+            pass
+    config_path.write_text(text, encoding="utf-8")
+    try:
+        refresh_llm_client()
+    except Exception:
+        pass
+
+
+def render_settings_page():
+    render_page_hero(
+        "审计配置",
+        "在这里调整大项目覆盖、依赖树规模和任务上限。保存后立即作用于下一次审计，无需重启。",
+        "Settings",
+    )
+    st.info("页面读取的是当前目录的 config.yaml，不是 config.example.yaml。保存只更新对应字段，并尽量保留原有注释。")
+
+    with st.form("audit_settings_form"):
+        st.markdown("### 模型连接")
+        st.caption("只需配置接口地址和密钥。模型名、并发、超时仍使用 config.yaml 中的现有值。")
+        base_url = st.text_input(
+            "接口地址 openai.base_url",
+            value=str(_cfg_openai("base_url", "http://127.0.0.1:8000/v1")),
+            help="OpenAI 兼容接口地址。本地 llama-server 填 http://127.0.0.1:8000/v1。",
+        )
+        api_key = st.text_input(
+            "接口密钥 openai.api_key",
+            value=str(_cfg_openai("api_key", "")),
+            type="password",
+            help="调用模型接口的密钥。本地 llama-server 可填任意非空值。",
+        )
+
+        st.markdown("### 覆盖与规模")
+        st.caption("大项目建议：建树上限 600，保留依赖树 120，完整上下文 80，轻量审计 200。0 表示自动或不限制。")
+        c1, c2 = st.columns(2)
+        with c1:
+            tree_build_limit = st.number_input(
+                "建树节点上限 agent2_tree_build_limit",
+                min_value=0,
+                max_value=20000,
+                value=_cfg_int("agent2_tree_build_limit", 0),
+                help="大项目建完整依赖树前的候选上限。0=自动：节点超过 800 时只对前 600 个高价值节点建树。调大更全，但建树更慢。",
+            )
+            st.caption("建议大项目填 600。先筛有安全信号的节点再建树，避免扫几千个节点。")
+            max_trees = st.number_input(
+                "保留依赖树数量 agent2_max_trees",
+                min_value=0,
+                max_value=5000,
+                value=_cfg_int("agent2_max_trees", 0),
+                help="最终进入树审计的依赖树数量。0=按项目规模自动取 80～160，并按文件均衡。调大可覆盖更多调用链。",
+            )
+            st.caption("建议 120。这些树带上下游调用链，用来发现跨函数漏洞。")
+        with c2:
+            full_fit_limit = st.number_input(
+                "完整上下文节点数 agent2_full_fit_limit",
+                min_value=0,
+                max_value=5000,
+                value=_cfg_int("agent2_full_fit_limit", 80),
+                help="对多少个高分节点做完整局部上下文适配。0=不限制。这部分最慢，但上下文最完整。",
+            )
+            st.caption("建议 80。这部分最准，也最耗时。")
+            light_fit_limit = st.number_input(
+                "轻量审计节点数 agent2_light_fit_limit",
+                min_value=0,
+                max_value=10000,
+                value=_cfg_int("agent2_light_fit_limit", 200),
+                help="对其余通过预筛的节点做单节点轻量审计的上限。0=不限制。用于补覆盖，成本低于完整上下文。",
+            )
+            st.caption("建议 200。只审函数自身，用来补覆盖。")
+
+        st.markdown("### 任务上限")
+        c3, c4 = st.columns(2)
+        with c3:
+            max_payloads = st.number_input(
+                "最终任务数上限 agent2_max_payloads",
+                min_value=0,
+                max_value=20000,
+                value=_cfg_int("agent2_max_payloads", 0),
+                help="送入模型的最终任务数上限。0=不截断，保证覆盖。设为正数可限制总耗时。",
+            )
+            st.caption("建议保持 0，去重后的任务全部送审。")
+        with c4:
+            max_per_file = st.number_input(
+                "单文件任务上限 agent2_max_per_file",
+                min_value=0,
+                max_value=100,
+                value=_cfg_int("agent2_max_per_file", 0),
+                help="仅在设置了最终任务数上限时生效。每个文件最多保留多少个任务。0=不限制单文件。",
+            )
+            st.caption("建议保持 0。只有设置了总上限时才需要限制单文件。")
+
+        st.markdown("### 预筛与上下文")
+        c5, c6, c7 = st.columns(3)
+        with c5:
+            score_threshold = st.number_input(
+                "预筛分数阈值 agent2_candidate_score_threshold",
+                min_value=-1,
+                max_value=100,
+                value=_cfg_int("agent2_candidate_score_threshold", 8),
+                help="节点进入审计候选的最低分。-1=关闭预筛，所有节点都进入候选。值越大越快，但可能漏掉边缘风险。",
+            )
+            st.caption("你当前是 16。想覆盖更全可改为 8；-1 关闭预筛。")
+        with c6:
+            context_depth = st.number_input(
+                "上下文深度 audit_context_depth",
+                min_value=1,
+                max_value=6,
+                value=_cfg_int("audit_context_depth", 2),
+                help="局部子图向上/向下扩展的最大层数。越大越容易拼出完整漏洞链路，上下文也更长。",
+            )
+            st.caption("建议 2。")
+        with c7:
+            max_audit_nodes = st.number_input(
+                "单次最大节点数 max_audit_nodes",
+                min_value=1,
+                max_value=50,
+                value=_cfg_int("max_audit_nodes", 12),
+                help="一次局部审计最多纳入多少个相关节点。越大覆盖越广，提示词也越长。",
+            )
+            st.caption("建议 8～12。")
+
+        submitted = st.form_submit_button("保存并启用", type="primary", width="stretch")
+        if submitted:
+            project_values = {
+                "agent2_tree_build_limit": int(tree_build_limit),
+                "agent2_max_trees": int(max_trees),
+                "agent2_full_fit_limit": int(full_fit_limit),
+                "agent2_light_fit_limit": int(light_fit_limit),
+                "agent2_max_payloads": int(max_payloads),
+                "agent2_max_per_file": int(max_per_file),
+                "agent2_candidate_score_threshold": int(score_threshold),
+                "audit_context_depth": int(context_depth),
+                "max_audit_nodes": int(max_audit_nodes),
+            }
+            openai_values = {
+                "base_url": base_url.strip(),
+                "api_key": api_key.strip(),
+            }
+            _save_settings(project_values, openai_values)
+            st.success("已写入当前 config.yaml，并已对当前进程生效。下一次审计会使用新参数。")
+
+
 def init_session_state():
     st.session_state.setdefault("batch_size", 10)
     st.session_state.setdefault("keep_files", True)
@@ -927,12 +1129,19 @@ def main():
         st.session_state.batch_size = st.slider("每批任务数", min_value=1, max_value=30, value=st.session_state.batch_size)
         st.session_state.keep_files = st.checkbox("保留上传与解压文件", value=st.session_state.keep_files)
         st.markdown("---")
-        page = st.radio("功能导航", ["分析", "结果可视化", "依赖可视化"], label_visibility="collapsed")
+        st.markdown("## 功能导航")
+        page = st.radio(
+            "功能导航",
+            ["分析", "结果可视化", "依赖可视化", "配置"],
+            label_visibility="collapsed",
+        )
 
     if page == "分析":
         render_analysis_page(workspace)
     elif page == "结果可视化":
         render_result_list_page(workspace)
+    elif page == "配置":
+        render_settings_page()
     else:
         render_graph_page(workspace)
 
