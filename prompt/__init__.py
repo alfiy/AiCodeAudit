@@ -254,6 +254,18 @@ PROMPT_AGENT_2_BASE = """
 5. 普通空指针风险猜测
 6. 单纯“可能崩溃”“可能泄露”的泛化描述
 7. 没有用户可控输入的内部函数调用
+8. 框架查询构造器本身，例如 ORM / Mysql.php 的 FIND_IN_SET、REGEXP、where 拼接实现
+9. 仅因为局部上下文没看到路由鉴权，就对服务层函数报权限绕过
+10. mkdir 权限、普通文件存在检查、普通日志写入这类弱证据
+
+必须额外检查这些容易漏掉的真实问题：
+1. 用户输入直接进入 file_get_contents、curl、请求 URL，报 SSRF 或任意文件读
+2. SQL / ORDER BY / ES script / Mongo 字段名直接拼接用户输入
+3. ctx._source 或 Painless script source 由变量名拼接
+4. 源码或注释中的密码、AK/SK、client_secret、PHPSESSID
+5. mt_rand、双重 MD5、弱盐的密码存储
+6. Access-Control-Allow-Origin:* 同时 Allow-Credentials:true
+7. 上传文件未做扩展名白名单就写入可访问目录
 
 漏洞判定标准：
 1. 若找到“输入源 + 危险点 + 缺失防护”，输出“确认风险”
@@ -454,14 +466,32 @@ PROMPT_AGENT_2_LANGUAGE_RULES = {
 }
 
 
-def build_agent_2_prompt(extensions: list[str]) -> str:
+def build_agent_2_prompt(extensions: list[str], thinking: bool = False) -> str:
     rules = []
     for ext in extensions:
         rule = PROMPT_AGENT_2_LANGUAGE_RULES.get(ext.lower())
         if rule and rule not in rules:
             rules.append(rule.strip())
 
-    if not rules:
-        return PROMPT_AGENT_2_BASE
+    base = PROMPT_AGENT_2_BASE
+    if thinking:
+        base += """
 
-    return PROMPT_AGENT_2_BASE + "\n\n" + "\n\n".join(rules)
+思考模式附加要求：
+1. 可以先简短思考，但思考不超过 8 句话。
+2. 思考结束后必须立刻输出最终 <审计报告>，不要继续展开分析。
+3. 正式输出中禁止出现“我们需要回答用户”“需要分析”“我倾向”等推理原文。
+4. 没有足够证据时直接输出审计通过，不要为了更全而降低判定标准。
+"""
+    else:
+        base += """
+
+关闭思考附加要求：
+1. 不要输出任何分析过程，直接给最终报告。
+2. 仍要覆盖 SSRF、SQL 拼接、硬编码凭证、弱加密、CORS 错误配置、上传白名单缺失。
+3. 证据不足时输出可疑风险或审计通过，不要猜测。
+"""
+
+    if not rules:
+        return base
+    return base + "\n\n" + "\n\n".join(rules)

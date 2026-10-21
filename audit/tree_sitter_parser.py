@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from audit.chunker import split_source_file_semantic
 from loguru import logger
@@ -145,20 +146,20 @@ def _scope_name(class_stack: list[str], func_name: str) -> str:
     return func_name
 
 
-def _node_text(node: Node | None, source_bytes: bytes) -> str:
+def _node_text(node: Any | None, source_bytes: bytes) -> str:
     if node is None:
         return ""
     return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore").strip()
 
 
-def _first_named_child_by_types(node: Node, node_types: set[str]):
+def _first_named_child_by_types(node: Any, node_types: set[str]):
     for child in node.named_children:
         if child.type in node_types:
             return child
     return None
 
 
-def _find_first_descendant(node: Node, node_types: set[str]):
+def _find_first_descendant(node: Any, node_types: set[str]):
     stack = [node]
     while stack:
         current = stack.pop()
@@ -228,7 +229,7 @@ def _extract_import_targets(raw: str, extension: str) -> list[str]:
     return targets
 
 
-def _extract_expression_name(node: Node | None, source_bytes: bytes) -> str:
+def _extract_expression_name(node: Any | None, source_bytes: bytes) -> str:
     if node is None:
         return ""
 
@@ -274,7 +275,7 @@ def _extract_expression_name(node: Node | None, source_bytes: bytes) -> str:
     return _node_text(node, source_bytes)
 
 
-def _extract_callable_name(node: Node, source_bytes: bytes) -> str:
+def _extract_callable_name(node: Any, source_bytes: bytes) -> str:
     if node.type == "member_call_expression":
         object_name = ""
         method_name = ""
@@ -349,7 +350,7 @@ class GenericTreeSitterDependencyVisitor:
         if candidate not in deps:
             deps.append(candidate)
 
-    def walk(self, node: Node):
+    def walk(self, node: Any):
         if node.type in DECORATED_NODE_TYPES:
             self._visit_decorated(node)
             return
@@ -372,12 +373,12 @@ class GenericTreeSitterDependencyVisitor:
         for child in node.named_children:
             self.walk(child)
 
-    def _visit_decorated(self, node: Node):
+    def _visit_decorated(self, node: Any):
         definition = _first_named_child_by_types(node, CLASS_NODE_TYPES | FUNCTION_NODE_TYPES)
         if definition is not None:
             self.walk(definition)
 
-    def _visit_class(self, node: Node):
+    def _visit_class(self, node: Any):
         name_node = node.child_by_field_name("name") or _find_first_descendant(node, IDENTIFIER_NODE_TYPES)
         class_name = _node_text(name_node, self.source_bytes) or "AnonymousClass"
         self.class_stack.append(class_name)
@@ -387,7 +388,7 @@ class GenericTreeSitterDependencyVisitor:
                 self.walk(child)
         self.class_stack.pop()
 
-    def _visit_function_like(self, node: Node):
+    def _visit_function_like(self, node: Any):
         name_node = node.child_by_field_name("name") or _find_first_descendant(node, IDENTIFIER_NODE_TYPES)
         func_name = _node_text(name_node, self.source_bytes) or "anonymous"
         start_line = self.base_line + node.start_point[0]
@@ -406,19 +407,19 @@ class GenericTreeSitterDependencyVisitor:
         self.scope_stack.pop()
         self.scope_dependencies.setdefault(scope.name, [])
 
-    def _visit_import(self, node: Node):
+    def _visit_import(self, node: Any):
         raw = _node_text(node, self.source_bytes)
         for target in _extract_import_targets(raw, self.extension):
             self.add_dependency(target)
 
-    def _visit_call(self, node: Node):
+    def _visit_call(self, node: Any):
         target_name = _extract_callable_name(node, self.source_bytes)
         if target_name:
             self.add_dependency(target_name)
         for child in node.named_children:
             self.walk(child)
 
-    def _visit_js_variable_declarator(self, node: Node):
+    def _visit_js_variable_declarator(self, node: Any):
         name_node = node.child_by_field_name("name")
         value_node = node.child_by_field_name("value")
         if value_node is not None and value_node.type in {"arrow_function", "function", "function_expression"}:

@@ -603,6 +603,13 @@ def render_analysis_page(workspace: Path):
     st.caption("推荐上传完整项目的 `zip` 压缩包。系统会自动解压、扫描源码、提取依赖，再生成结构化审计报告与 GraphML 图谱。")
 
     uploaded_file = st.file_uploader("上传项目压缩包", type=["zip"])
+    enable_thinking = st.checkbox(
+        "开启模型思考",
+        value=st.session_state.get("enable_thinking", False),
+        help="默认关闭。关闭时更快，并已加强常见漏洞覆盖。开启后模型会先简短推理再出报告，覆盖可能更全，但耗时会明显增加。",
+        disabled=st.session_state.get("analyzing", False),
+    )
+    st.session_state.enable_thinking = enable_thinking
     if uploaded_file is None:
         st.info("请上传一个 zip 压缩包。")
         return
@@ -627,7 +634,12 @@ def render_analysis_page(workspace: Path):
                 batch_name = f"{sanitize_name(project_dir.name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 output_dir = subdirs["results"] / batch_name
                 st.write("开始执行 AI 审计")
-                result = run_audit(str(project_dir), str(output_dir), batch_size=st.session_state.batch_size)
+                result = run_audit(
+                    str(project_dir),
+                    str(output_dir),
+                    batch_size=st.session_state.batch_size,
+                    enable_thinking=bool(st.session_state.get("enable_thinking", False)),
+                )
                 st.session_state.latest_result = result
                 status.update(label="分析完成", state="complete")
 
@@ -1134,6 +1146,7 @@ def render_settings_page():
 
 def init_session_state():
     st.session_state.setdefault("batch_size", 10)
+    st.session_state.setdefault("enable_thinking", False)
     st.session_state.setdefault("analysis_done", False)
     st.session_state.setdefault("analyzing", False)
     st.session_state.setdefault("keep_files", True)

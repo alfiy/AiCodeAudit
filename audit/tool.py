@@ -125,6 +125,7 @@ LANGUAGE_SECURITY_HINT_PATTERNS = {
     ".php": {
         "input_sources": [
             r"\b(_GET|_POST|_REQUEST|_FILES|_COOKIE|_SERVER|_ENV)\b",
+            r"\b(request\s*->\s*(get|post|param|file|header))\b",
         ],
         "dangerous_sinks": [
             r"\b(include|include_once|require|require_once)\b",
@@ -132,6 +133,9 @@ LANGUAGE_SECURITY_HINT_PATTERNS = {
             r"\b(mysqli_query|query|exec|PDO)\b",
             r"\b(file_get_contents|fopen|fwrite|readfile)\b",
             r"\b(unserialize)\b",
+            r"ctx\._source",
+            r"\b(mt_rand|md5\s*\()\b",
+            r"Access-Control-Allow-Origin",
         ],
         "safety_signals": [
             r"\b(PDO::prepare|prepare\s*\(|realpath|basename)\b",

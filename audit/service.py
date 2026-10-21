@@ -695,6 +695,24 @@ def is_pass_only_report(report: str) -> bool:
     return normalized in PASS_CONCLUSIONS
 
 
+def _dedupe_reports(reports: list[str]) -> list[str]:
+    seen = set()
+    unique = []
+    for report in reports:
+        path = re.search(r"路径:\s*([^\n]+)", report)
+        vuln = re.search(r"类型:\s*([^\n]+)", report)
+        file_key = "unknown"
+        if path:
+            file_key = os.path.basename(path.group(1).strip())
+        type_key = vuln.group(1).strip() if vuln else "unknown"
+        key = f"{file_key}|{type_key}"
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(report)
+    return unique
+
+
 async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
     payloads = build_audit_payloads(graph)
     logger.info("Agent_2 开始执行，局部上下文任务数: {}", len(payloads))
@@ -726,6 +744,7 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
                 filtered_pass_count += 1
                 continue
             reports.append(normalized)
+        reports = _dedupe_reports(reports)
         write_file(
             out_file,
             "\n--------------------------------\n".join(reports)
@@ -740,6 +759,7 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
         incomplete_report = _build_incomplete_audit_report(total_tasks, failed_count, failure_rate_threshold)
         final_report = incomplete_report
         if reports:
+            reports = _dedupe_reports(reports)
             final_report += "\n--------------------------------\n" + "\n--------------------------------\n".join(reports)
         write_file(out_file, final_report)
         logger.warning(
@@ -762,7 +782,10 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
     )
 
 
-def run_audit(project_dir: str, output_dir: str, batch_size: int = 10):
+def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_thinking: bool = False):
+    from audit.agent import set_thinking_enabled
+    set_thinking_enabled(False)
+    logger.info("本次审计思考模式: {}", "开启" if enable_thinking else "关闭")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -782,6 +805,7 @@ def run_audit(project_dir: str, output_dir: str, batch_size: int = 10):
         logger.info("项目依赖解析文件存在，直接跳过")
 
     logger.info("调用异步处理 Agent_2...")
+    set_thinking_enabled(enable_thinking)
     graph = nx.read_graphml(graph_path)
     asyncio.run(async_run_agent_2(graph, out_file=report_path, batch_size=batch_size))
     logger.success("输出成功，请在目录:{}查看", output_dir)

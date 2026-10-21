@@ -179,6 +179,18 @@ def _log_retry_warning(exc: Exception, attempt: int, backoff: float):
     )
 
 
+_thinking_enabled = False
+
+
+def set_thinking_enabled(enabled: bool):
+    global _thinking_enabled
+    _thinking_enabled = bool(enabled)
+
+
+def is_thinking_enabled() -> bool:
+    return _thinking_enabled
+
+
 async def chat_completion_text(text: str, prompt: str):
     messages = [
         {
@@ -222,9 +234,9 @@ async def chat_completion_messages(messages) -> str:
                 response = await llm.chat.completions.create(
                     model=C.openai.model,
                     messages=messages,
-                    max_tokens=getattr(C.openai, "max_output_tokens", 2048),
+                    max_tokens=min(int(getattr(C.openai, "max_output_tokens", 2048)), 1536) if is_thinking_enabled() else getattr(C.openai, "max_output_tokens", 2048),
                     temperature=0.1,
-                    #extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    extra_body={"chat_template_kwargs": {"enable_thinking": is_thinking_enabled()}},
                 )
             if response.choices:
                 choice = response.choices[0]
@@ -233,13 +245,22 @@ async def chat_completion_messages(messages) -> str:
                 reasoning = (getattr(message, "reasoning_content", None) or "").strip()
                 finish_reason = getattr(choice, "finish_reason", None)
 
-                # 优先使用正式 content；若只有推理文本，尽量抽出其中的结构化报告
+                # 优先正式 content。思考文本只在能抽出结构化报告时使用，避免把推理过程写进结果。
                 final_text = content
                 source = "content"
                 if not final_text and reasoning:
                     structured = _extract_structured_report(reasoning)
-                    final_text = structured or reasoning
-                    source = "structured_from_reasoning" if structured else "reasoning_content"
+                    if structured:
+                        final_text = structured
+                        source = "structured_from_reasoning"
+                    else:
+                        logger.warning(
+                            "模型仅返回思考内容且未抽出结构化报告，已忽略。长度={}，finish_reason={}",
+                            len(reasoning),
+                            finish_reason,
+                        )
+                        final_text = ""
+                        source = "ignored_reasoning"
                 if final_text:
                     logger.info(
                         "模型请求成功，输入约 {} tokens，输出来源={}，长度={}，finish_reason={}",
@@ -324,7 +345,7 @@ async def agent_1(source_file: SourceFile):
 async def agent_2(text: str) -> str:
     extensions = sorted(set(re.findall(r"\.(py|js|ts|java|go|php|c|cpp|cs)\b", text, flags=re.IGNORECASE)))
     normalized_extensions = [f".{ext.lower()}" for ext in extensions]
-    prompt = build_agent_2_prompt(normalized_extensions)
+    prompt = build_agent_2_prompt(normalized_extensions, thinking=is_thinking_enabled())
     if normalized_extensions:
         logger.debug("Agent_2 使用语言增强规则: {}", ", ".join(normalized_extensions))
     return await chat_completion_text(text, prompt)
