@@ -479,13 +479,155 @@ def _build_code_units_from_visitor(source_file: SourceFile, visitor: GenericTree
     return code_units or None
 
 
+_PARSER_CACHE = {}
+_QUERY_CACHE = {}
+
+
+def _get_cached_parser(language: str):
+    parser = _PARSER_CACHE.get(language)
+    if parser is None:
+        parser = get_parser(language)
+        _PARSER_CACHE[language] = parser
+    return parser
+
+
+def _is_minified_bundle(source_file: SourceFile) -> bool:
+    path = source_file.path.replace("\\", "/").lower()
+    name = source_file.name.lower()
+    if any(marker in path for marker in (
+        "/public/js/app.js",
+        ".min.js",
+        "/dist/",
+        "/third-party/",
+        "/node_modules/",
+        "/vendor/",
+    )):
+        return True
+    if name in {"app.js", "vendor.js", "bundle.js"} and len(source_file.source_code) > 100000:
+        return True
+    return False
+
+
+_LANGUAGE_QUERIES = {
+    "python": """
+(function_definition name: (identifier) @def.name) @def
+(class_definition name: (identifier) @class.name) @class
+(call function: (identifier) @call.name) @call
+(call function: (attribute attribute: (identifier) @call.name)) @call
+(import_statement) @import
+(import_from_statement) @import
+""",
+    "javascript": """
+(function_declaration name: (identifier) @def.name) @def
+(method_definition name: (property_identifier) @def.name) @def
+(class_declaration name: (identifier) @class.name) @class
+(call_expression function: (identifier) @call.name) @call
+(call_expression function: (member_expression property: (property_identifier) @call.name)) @call
+(import_statement) @import
+""",
+    "php": """
+(function_definition name: (name) @def.name) @def
+(method_declaration name: (name) @def.name) @def
+(class_declaration name: (name) @class.name) @class
+(function_call_expression function: (name) @call.name) @call
+(member_call_expression name: (name) @call.name) @call
+(namespace_use_declaration) @import
+""",
+    "java": """
+(method_declaration name: (identifier) @def.name) @def
+(constructor_declaration name: (identifier) @def.name) @def
+(class_declaration name: (identifier) @class.name) @class
+(method_invocation name: (identifier) @call.name) @call
+(import_declaration) @import
+""",
+}
+
+
+def _get_language_query(parser, language: str):
+    cached = _QUERY_CACHE.get(language)
+    if cached is not None:
+        return cached
+    source = _LANGUAGE_QUERIES.get(language)
+    if not source:
+        return None
+    try:
+        query = parser.language.query(source)
+    except Exception as exc:
+        logger.debug("Tree-sitter query 不可用，回退遍历: {} | {}", language, exc)
+        query = None
+    _QUERY_CACHE[language] = query
+    return query
+
+
+def _extract_with_query(source_file: SourceFile, tree, language: str, parser) -> list[CodeUnit] | None:
+    query = _get_language_query(parser, language)
+    if query is None:
+        return None
+    try:
+        captures = query.captures(tree.root_node)
+    except Exception:
+        return None
+    if not captures:
+        return None
+
+    defs = []
+    calls = []
+    imports = []
+    for node, name in captures:
+        if name == "def":
+            defs.append(node)
+        elif name == "call":
+            calls.append(node)
+        elif name == "import":
+            imports.append(node)
+
+    if not defs and not calls and not imports:
+        return None
+
+    source_bytes = source_file.source_code.encode("utf-8")
+    units: list[CodeUnit] = []
+    for definition in defs:
+        name_node = definition.child_by_field_name("name")
+        func_name = _node_text(name_node, source_bytes) or "anonymous"
+        if source_file.extension.lower() == ".js" and len(func_name) <= 2:
+            continue
+        start_line = source_file.start_line + definition.start_point[0]
+        end_line = source_file.start_line + definition.end_point[0]
+        scoped_code = get_code_by_line(
+            source_file.source_code,
+            start_line=start_line,
+            end_line=end_line,
+            base_line=source_file.start_line,
+        )
+        targets = []
+        for call in calls:
+            if definition.start_byte <= call.start_byte <= definition.end_byte:
+                target = _extract_callable_name(call, source_bytes)
+                if target and target not in targets:
+                    targets.append(target)
+        if not targets:
+            targets = ["无外部依赖"]
+        for target in targets:
+            units.append(CodeUnit(
+                source_code=scoped_code,
+                start_code_line=start_line,
+                end_code_line=end_line,
+                name=source_file.name,
+                path=source_file.path,
+                source_name=func_name,
+                target_name=target,
+                source_desc=_build_desc(target),
+            ))
+    return units or None
+
+
 def _build_tree_from_source(source_file: SourceFile, language: str):
     try:
-        parser = get_parser(language)
-        return parser.parse(source_file.source_code.encode("utf-8"))
+        parser = _get_cached_parser(language)
+        return parser, parser.parse(source_file.source_code.encode("utf-8"))
     except Exception as exc:  # pragma: no cover - optional dependency runtime
         logger.warning("Tree-sitter 解析失败，回退其他方案: {} | {} | {}", language, source_file.path, exc)
-        return None
+        return None, None
 
 
 def _fallback_tree_sitter_by_semantic_chunks(source_file: SourceFile, language: str) -> list[CodeUnit] | None:
@@ -503,6 +645,8 @@ def _fallback_tree_sitter_by_semantic_chunks(source_file: SourceFile, language: 
     successful_chunks = 0
     for chunk in fallback_chunks:
         tree = _build_tree_from_source(chunk, language)
+        if isinstance(tree, tuple):
+            _, tree = tree
         if tree is None or tree.root_node is None or tree.root_node.has_error:
             continue
         visitor = GenericTreeSitterDependencyVisitor(chunk)
@@ -527,18 +671,25 @@ def _fallback_tree_sitter_by_semantic_chunks(source_file: SourceFile, language: 
 def extract_code_units_with_tree_sitter(source_file: SourceFile) -> list[CodeUnit] | None:
     if not supports_tree_sitter(source_file.extension):
         return None
+    if _is_minified_bundle(source_file):
+        logger.debug("跳过压缩/打包文件的 Tree-sitter 解析: {}", source_file.path)
+        return None
 
     language = get_tree_sitter_language(source_file.extension)
     if language is None:
         return None
 
-    tree = _build_tree_from_source(source_file, language)
+    parser, tree = _build_tree_from_source(source_file, language)
     if tree is None:
         return None
 
     if tree.root_node is None or tree.root_node.has_error:
         logger.warning("Tree-sitter 发现语法错误，尝试语义块回退: {}", source_file.path)
         return _fallback_tree_sitter_by_semantic_chunks(source_file, language)
+
+    queried = _extract_with_query(source_file, tree, language, parser)
+    if queried:
+        return queried
 
     visitor = GenericTreeSitterDependencyVisitor(source_file)
     visitor.walk(tree.root_node)

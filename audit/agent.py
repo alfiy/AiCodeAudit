@@ -224,7 +224,7 @@ async def chat_completion_messages(messages) -> str:
                     messages=messages,
                     max_tokens=getattr(C.openai, "max_output_tokens", 2048),
                     temperature=0.1,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    #extra_body={"chat_template_kwargs": {"enable_thinking": False}},
                 )
             if response.choices:
                 choice = response.choices[0]

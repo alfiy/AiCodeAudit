@@ -607,9 +607,17 @@ def render_analysis_page(workspace: Path):
         st.info("请上传一个 zip 压缩包。")
         return
 
-    if st.button("开始分析", type="primary", width="stretch"):
-        zip_path = save_uploaded_zip(uploaded_file, subdirs["uploads"])
+    analyzing = st.session_state.get("analyzing", False)
+    analysis_done = st.session_state.get("analysis_done", False)
+    button_label = "分析中..." if analyzing else ("重新分析" if analysis_done else "开始分析")
+    clicked = st.button(button_label, type="primary", width="stretch", disabled=analyzing)
 
+    if clicked and not analyzing:
+        st.session_state.analyzing = True
+        st.rerun()
+
+    if analyzing:
+        zip_path = save_uploaded_zip(uploaded_file, subdirs["uploads"])
         try:
             with st.status("正在解压并分析项目...", expanded=True) as status:
                 st.write("保存上传文件")
@@ -624,11 +632,13 @@ def render_analysis_page(workspace: Path):
                 status.update(label="分析完成", state="complete")
 
             st.success("分析完成，请从侧边栏进入“结果可视化”或“依赖可视化”查看。")
+            st.session_state.analysis_done = True
         except zipfile.BadZipFile:
             st.error("上传文件不是有效的 zip 压缩包。")
         except Exception as exc:
             st.exception(exc)
         finally:
+            st.session_state.analyzing = False
             if not st.session_state.keep_files:
                 if zip_path.exists():
                     zip_path.unlink()
@@ -636,6 +646,7 @@ def render_analysis_page(workspace: Path):
                     shutil.rmtree(run_root, ignore_errors=True)
                 if "output_dir" in locals() and output_dir.exists():
                     shutil.rmtree(output_dir, ignore_errors=True)
+            st.rerun()
 
 
 def get_selected_result(workspace: Path):
@@ -659,14 +670,14 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
         st.session_state[session_key] = results[0]["label"]
 
     st.markdown("#### 历史分析结果")
-    st.caption("点击「查看」切换当前结果，点击「删除」可移除该次审计记录。")
+    st.caption("点击「查看」切换当前结果，点击「下载」保存审计日志，点击「删除」可移除该次审计记录。")
 
     pending = st.session_state.get("pending_delete_label")
 
     for item in results:
         is_selected = item["label"] == st.session_state.get(session_key)
         with st.container(border=True):
-            c1, c2, c3 = st.columns([6, 1.2, 1.2])
+            c1, c2, c3, c4 = st.columns([5.2, 1.1, 1.1, 1.1])
             with c1:
                 title = item["label"]
                 if is_selected:
@@ -679,6 +690,20 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
                     st.session_state[session_key] = item["label"]
                     st.rerun()
             with c3:
+                report_path = item.get("report_path") or ""
+                if report_path and os.path.exists(report_path):
+                    report_name = Path(report_path).name
+                    st.download_button(
+                        "下载",
+                        data=Path(report_path).read_bytes(),
+                        file_name=report_name,
+                        mime="text/plain",
+                        key=f"download_{session_key}_{item['label']}",
+                        width="stretch",
+                    )
+                else:
+                    st.button("下载", key=f"download_disabled_{session_key}_{item['label']}", width="stretch", disabled=True)
+            with c4:
                 if st.button("删除", key=f"del_{session_key}_{item['label']}", width="stretch", type="secondary"):
                     st.session_state.pending_delete_label = item["label"]
                     st.rerun()
@@ -1109,6 +1134,8 @@ def render_settings_page():
 
 def init_session_state():
     st.session_state.setdefault("batch_size", 10)
+    st.session_state.setdefault("analysis_done", False)
+    st.session_state.setdefault("analyzing", False)
     st.session_state.setdefault("keep_files", True)
     st.session_state.setdefault("latest_result", None)
     st.session_state.setdefault("pending_delete_label", None)
