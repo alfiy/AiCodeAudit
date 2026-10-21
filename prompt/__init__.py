@@ -266,6 +266,8 @@ PROMPT_AGENT_2_BASE = """
 5. mt_rand、双重 MD5、弱盐的密码存储
 6. Access-Control-Allow-Origin:* 同时 Allow-Credentials:true
 7. 上传文件未做扩展名白名单就写入可访问目录
+8. Class.forName、Method.invoke、定时任务 invokeTarget 反射调用。看到 Class.forName 或 method.invoke 就必须输出确认风险或可疑风险，不能判审计通过
+9. application.yml / application-druid.yml 中的默认密码、token secret、监控后台口令
 
 漏洞判定标准：
 1. 若找到“输入源 + 危险点 + 缺失防护”，输出“确认风险”

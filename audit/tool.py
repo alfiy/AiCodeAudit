@@ -94,6 +94,7 @@ LANGUAGE_SECURITY_HINT_PATTERNS = {
             r"\b(HttpURLConnection|RestTemplate|WebClient)\b",
             r"\b(FileInputStream|FileOutputStream|Files\.(read|write))\b",
             r"\b(Statement|createStatement|executeQuery|executeUpdate)\b",
+            r"\b(Class\.forName|getDeclaredMethod|getMethod|Method\.invoke|invokeTarget)\b",
         ],
         "safety_signals": [
             r"\b(PreparedStatement|@PreAuthorize|hasRole)\b",
@@ -183,6 +184,7 @@ LANGUAGE_SECURITY_HINT_PATTERNS = {
             r"\b(Process\.Start|SqlCommand|ExecuteReader|ExecuteNonQuery)\b",
             r"\b(File\.(ReadAllText|WriteAllText|OpenRead|OpenWrite))\b",
             r"\b(HttpClient\.(GetAsync|PostAsync|SendAsync))\b",
+            r"\b(Class\.forName|getDeclaredMethod|method\.invoke|invokeTarget)\b",
         ],
         "safety_signals": [
             r"\b(Path\.GetFullPath|Path\.Combine|SqlParameter)\b",
@@ -201,6 +203,7 @@ SECURITY_HINT_PATTERNS = {
     ],
     "dangerous_sinks": [
         *COMMON_SECURITY_HINT_PATTERNS["dangerous_sinks"],
+        r"(?i)(password|secret|access[_-]?key|client_secret)\s*[:=]\s*['\"]?[^'\"\s]{4,}",
     ],
     "safety_signals": [
         *COMMON_SECURITY_HINT_PATTERNS["safety_signals"],

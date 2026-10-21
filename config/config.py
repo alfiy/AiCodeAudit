@@ -25,7 +25,7 @@ def create_default_config(file_path):
         },
         'project': {
             "source_file_ext": [".py", ".go", ".js", ".java", ".cpp", ".php", ".aspx", ".asp", ".c", ".cs"],
-            "config_file_ext": [".yaml", ".xml", ".json", ".conf", ".ini", ".toml", ".config", ".settings"],
+            "config_file_ext": [".yaml", ".yml", ".xml", ".json", ".conf", ".ini", ".toml", ".config", ".settings", ".properties"],
             "exclude_dir": ['node_modules', "dist", "build", "out", "venv", ".venv", "env", "target", "vendor",
                           "bower_components",
                           ".git", ".svn", ".hg", ".idea", ".vscode", ".metadata", "nbproject", "test", "tests", "spec",

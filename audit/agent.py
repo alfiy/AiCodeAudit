@@ -310,6 +310,17 @@ async def agent_1(source_file: SourceFile):
                 logger.debug("静态解析未提取到有效依赖，当前配置禁止回退到 LLM，返回空结果: {}", source_file.path)
                 return None
         elif parse_engine == "ast":
+            if source_file.extension.lower() in {".yaml", ".yml", ".xml", ".json", ".conf", ".ini", ".toml", ".properties"}:
+                return [CodeUnit(
+                    source_code=source_file.source_code,
+                    start_code_line=source_file.start_line,
+                    end_code_line=source_file.start_line + max(0, len(source_file.source_code.splitlines()) - 1),
+                    name=source_file.name,
+                    path=source_file.path,
+                    source_name=source_file.name,
+                    target_name="配置项",
+                    source_desc="配置文件",
+                )]
             logger.debug("当前文件类型暂不支持静态解析，且配置为 ast-only，返回空结果: {}", source_file.path)
             return None
         elif parse_engine == "auto":

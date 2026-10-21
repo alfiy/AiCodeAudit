@@ -213,10 +213,25 @@ def _candidate_precheck_score(graph: nx.DiGraph, node: str) -> tuple[int, dict]:
     return score, {"profile": profile, "local_summary": local_summary}
 
 
+def _is_critical_sink_node(node_data: dict) -> bool:
+    text = "\n".join([
+        str(node_data.get("source_code") or ""),
+        str(node_data.get("source_name") or ""),
+        str(node_data.get("path") or ""),
+    ])
+    return bool(re.search(
+        r"Class\.forName|invokeTarget|Method\.invoke|\.invoke\(|password\s*[:=]|secret\s*[:=]",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
 def _is_high_value_audit_candidate(graph: nx.DiGraph, node: str) -> tuple[bool, int]:
     score, context = _candidate_precheck_score(graph, node)
     profile = context["profile"]
     local_summary = context["local_summary"]
+    if _is_critical_sink_node(graph.nodes[node]):
+        score += 500
     raw_threshold = getattr(C.project, "agent2_candidate_score_threshold", 12)
     if raw_threshold is not None and raw_threshold < 0:
         return True, score
@@ -455,7 +470,7 @@ def build_audit_payloads(graph: nx.DiGraph) -> List[str]:
     light_fit_limit = int(getattr(C.project, "agent2_light_fit_limit", 200))
     candidates_to_fit = [
         (node, score) for node, score, is_cand in scored_nodes
-        if prescreen_disabled or is_cand
+        if prescreen_disabled or is_cand or _is_critical_sink_node(graph.nodes[node])
     ]
     candidates_to_fit.sort(key=lambda x: -x[1])
     full_fit = candidates_to_fit[:full_fit_limit] if full_fit_limit > 0 else candidates_to_fit
