@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import re
@@ -19,6 +18,7 @@ from matplotlib import font_manager
 from audit.agent import refresh_llm_client
 from audit.service import run_audit
 from config import C
+import base64
 
 
 st.set_page_config(
@@ -28,31 +28,50 @@ st.set_page_config(
 )
 
 
-def _trigger_file_download(file_path: str):
-    path = Path(file_path)
-    if not path.exists():
+def _render_download_anchor(label: str, data: bytes, file_name: str,
+                            mime: str = "text/plain", auto_click: bool = False):
+    """在 iframe 内渲染原生 <a download> 按钮，点击即下载，无 Streamlit toast。
+    auto_click=True 时渲染后立即自动触发下载（用于已点过下载图标的回调场景）。
+    """
+    import base64
+    b64 = base64.b64encode(data).decode("ascii")
+    href = f"data:{mime};base64,{b64}"
+    click_js = ("<script>document.getElementById('dl_anchor').click();</script>"
+                if auto_click else "")
+    html = f"""
+        <a id="dl_anchor" href="{href}" download="{file_name}"
+           style="display:inline-flex;align-items:center;justify-content:center;
+                  width:100%;min-height:38px;padding:0 14px;border-radius:8px;
+                  border:1px solid #d0d5dd;background:#fff;color:#344054;
+                  font-size:14px;font-weight:600;text-decoration:none;
+                  font-family:-apple-system,'Segoe UI',sans-serif;cursor:pointer;"
+           onmouseover="this.style.background='#f3f4f6';this.style.borderColor='#98a2b3'"
+           onmouseout="this.style.background='#fff';this.style.borderColor='#d0d5dd'">
+          {label}
+        </a>
+        {click_js}
+    """
+    components.html(html, height=48)
+
+
+def download_report_button(label: str, report_path: str):
+    """可见的下载按钮（替换卡片视图里的 st.download_button）。"""
+    path = Path(report_path) if report_path else None
+    if not path or not path.exists():
+        st.button(label, disabled=True, icon=":material/download:", width="stretch")
+        return
+    _render_download_anchor(label, path.read_bytes(), path.name)
+
+
+def _trigger_file_download(item: dict):
+    """历史扫描表格点击"下载"图标后，直接触发浏览器原生下载。"""
+    report_path = item.get("report_path") or ""
+    path = Path(report_path) if report_path else None
+    if not path or not path.exists():
         st.error("报告文件不存在。")
         return
-    payload = base64.b64encode(path.read_bytes()).decode("ascii")
-    components.html(
-        f"""
-        <script>
-        const bytes = atob({json.dumps(payload)});
-        const buffer = new Uint8Array(bytes.length);
-        for (let i = 0; i < bytes.length; i++) buffer[i] = bytes.charCodeAt(i);
-        const blob = new Blob([buffer], {{type: "text/plain"}});
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = {json.dumps(path.name)};
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-        </script>
-        """,
-        height=0,
-    )
+    # auto_click=True：用户已在表格里点过下载图标，这里直接落盘
+    _render_download_anchor("下载报告", path.read_bytes(), path.name, auto_click=True)
 
 
 def inject_global_styles():
@@ -1192,9 +1211,7 @@ def _render_history_table(results: list[dict], session_key: str):
         st.error(error)
     download_item = st.session_state.pop("history_download_item", None)
     if download_item:
-        report_path = download_item.get("report_path") or ""
-        if report_path:
-            _trigger_file_download(report_path)
+        _trigger_file_download(download_item)
     _render_pager(total, page_size, page_key, widget_suffix="_history")
 
 
@@ -1546,5 +1563,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
