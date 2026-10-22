@@ -3,4 +3,5 @@ output
 __pycache__
 .idea
 .venv
+static/downloads
 演示项目

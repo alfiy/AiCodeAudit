@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import yaml
 from matplotlib import font_manager
 
@@ -24,6 +26,33 @@ st.set_page_config(
     page_icon=":mag:",
     layout="wide",
 )
+
+
+def _trigger_file_download(file_path: str):
+    path = Path(file_path)
+    if not path.exists():
+        st.error("报告文件不存在。")
+        return
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    components.html(
+        f"""
+        <script>
+        const bytes = atob({json.dumps(payload)});
+        const buffer = new Uint8Array(bytes.length);
+        for (let i = 0; i < bytes.length; i++) buffer[i] = bytes.charCodeAt(i);
+        const blob = new Blob([buffer], {{type: "text/plain"}});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = {json.dumps(path.name)};
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def inject_global_styles():
@@ -901,22 +930,32 @@ def _load_result_rows(item: dict) -> list[dict]:
     return rows
 
 
-def _render_risk_table(all_rows: list[dict], selected: dict):
-    finding_page_size = 10
+def _render_filter_toolbar(prefix: str):
     st.markdown('<div class="filter-gap"></div>', unsafe_allow_html=True)
     tool_cols = st.columns([2.6, 1.8, 1.0])
     with tool_cols[0]:
-        keyword = st.text_input("搜索", placeholder="请输入关键词搜索", label_visibility="collapsed", key="risk_keyword")
+        keyword = st.text_input(
+            "搜索",
+            placeholder="请输入关键词搜索",
+            label_visibility="collapsed",
+            key=f"{prefix}_keyword",
+        )
     with tool_cols[1]:
         selected_levels = st.multiselect(
             "等级",
             ["高危", "中危", "低危", "信息"],
             default=["高危", "中危", "低危", "信息"],
             label_visibility="collapsed",
-            key="risk_levels",
+            key=f"{prefix}_levels",
         )
     with tool_cols[2]:
-        show_passed = st.toggle("显示通过", value=False, key="risk_show_passed")
+        show_passed = st.toggle("显示通过", value=False, key=f"{prefix}_show_passed")
+    return keyword or "", selected_levels, show_passed
+
+
+def _render_risk_table(all_rows: list[dict], selected: dict):
+    finding_page_size = 10
+    keyword, selected_levels, show_passed = _render_filter_toolbar("risk")
 
     visible_rows = []
     for row in all_rows:
@@ -1017,99 +1056,145 @@ def _render_risk_table(all_rows: list[dict], selected: dict):
         _render_pager(len(visible_rows), finding_page_size, "finding_page", widget_suffix="_bottom")
 
 
+def _handle_history_action(session_key: str, action: str):
+    click_key = f"history_{action}_click"
+    click = st.session_state.get(click_key)
+    items = st.session_state.get("_history_page_items") or []
+    if not click or not items:
+        return
+    row = click["row"] if isinstance(click, dict) else click.row
+    if row < 0 or row >= len(items):
+        return
+    item = items[row]
+    if action == "view":
+        st.session_state[session_key] = item["label"]
+        st.session_state["result_active_tab"] = "漏洞与风险"
+        st.rerun()
+    elif action == "delete":
+        output_dir = Path(item["output_dir"])
+        try:
+            if output_dir.exists():
+                shutil.rmtree(output_dir, ignore_errors=True)
+            latest = st.session_state.get("latest_result")
+            if latest and latest.get("output_dir") == str(output_dir):
+                st.session_state.latest_result = None
+            if st.session_state.get(session_key) == item["label"]:
+                st.session_state[session_key] = None
+            st.rerun()
+        except Exception as e:
+            st.session_state["history_action_error"] = f"删除失败：{e}"
+    elif action == "download":
+        st.session_state["history_download_item"] = item
+
+
 def _render_history_table(results: list[dict], session_key: str):
     page_size = 10
     page_key = "history_scan_page"
-    total = len(results)
+    st.markdown('<div class="filter-gap"></div>', unsafe_allow_html=True)
+    tool_cols = st.columns([2.6, 1.8, 1.0])
+    with tool_cols[0]:
+        keyword = st.text_input("搜索", placeholder="请输入关键词搜索", label_visibility="collapsed", key="history_keyword")
+    with tool_cols[1]:
+        selected_levels = st.multiselect(
+            "等级",
+            ["高危", "中危", "低危", "信息"],
+            default=["高危", "中危", "低危", "信息"],
+            label_visibility="collapsed",
+            key="history_levels",
+        )
+    with tool_cols[2]:
+        show_passed = st.toggle("显示通过", value=False, key="history_show_passed")
+
+    filtered = []
+    needle = (keyword or "").strip().lower()
+    for item in results:
+        name = Path(item["output_dir"]).name
+        time_text = item["label"].split("|")[-1].strip()
+        hash_text = (item.get("project_hash") or "")[:12]
+        if needle and needle not in f"{name} {time_text} {hash_text}".lower():
+            continue
+        if selected_levels != ["高危", "中危", "低危", "信息"] or show_passed:
+            rows = _load_result_rows(item)
+            levels = {row["level"] for row in rows if not row["pass"]}
+            if selected_levels and not levels.intersection(selected_levels):
+                continue
+            if show_passed and not any(row["pass"] for row in rows):
+                continue
+        filtered.append(item)
+
+    filter_sig = f"{needle}|{tuple(selected_levels)}|{show_passed}|{len(filtered)}"
+    if st.session_state.get("history_filter_sig") != filter_sig:
+        st.session_state["history_filter_sig"] = filter_sig
+        st.session_state[page_key] = 1
+
+    total = len(filtered)
+    if total == 0:
+        st.info("当前筛选条件下没有可展示结果。")
+        return
     total_pages = max(1, (total + page_size - 1) // page_size)
     current = max(1, int(st.session_state.get(page_key, 1) or 1))
     if current > total_pages:
         current = total_pages
         st.session_state[page_key] = current
     start = (current - 1) * page_size
-    page_results = results[start:start + page_size]
+    page_results = filtered[start:start + page_size]
+    st.session_state["_history_page_items"] = page_results
 
-    st.markdown(
-        """
-        <style>
-        .st-key-history_grid {
-          border: 1px solid #e6e6e6 !important;
-          border-radius: 8px !important;
-          background: #ffffff !important;
-          padding: 0 !important;
-          overflow: hidden;
-        }
-        .st-key-history_grid [data-testid="stVerticalBlock"] {
-          gap: 0 !important;
-        }
-        .st-key-history_grid [data-testid="stHorizontalBlock"] {
-          border-bottom: 1px solid #f0f0f0 !important;
-          margin: 0 !important;
-          padding: 0.15rem 0.45rem !important;
-          align-items: center !important;
-          min-height: 2.35rem;
-        }
-        .st-key-history_grid [data-testid="stHorizontalBlock"]:first-of-type {
-          background: #fafafa !important;
-          min-height: 2.5rem;
-        }
-        .st-key-history_grid [data-testid="stMarkdownContainer"] p,
-        .st-key-history_grid [data-testid="stText"] {
-          margin: 0 !important;
-          font-size: 0.9rem !important;
-          color: #1f2937;
-        }
-        .st-key-history_grid button,
-        .st-key-history_grid [data-testid="stBaseButton-secondary"],
-        .st-key-history_grid [data-testid="stDownloadButton"] button {
-          min-height: 1.7rem !important;
-          height: 1.7rem !important;
-          padding: 0 0.35rem !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
+    rows = []
+    for item in page_results:
+        report_path = item.get("report_path") or ""
+        rows.append({
+            "扫描目标": Path(item["output_dir"]).name,
+            "时间": item["label"].split("|")[-1].strip(),
+            "哈希": (item.get("project_hash") or "")[:12],
+            "查看": ":material/visibility:",
+            "下载": ":material/download:" if report_path and os.path.exists(report_path) else "",
+            "删除": ":material/delete:",
+        })
+    st.dataframe(
+        pd.DataFrame(rows),
+        width="stretch",
+        hide_index=True,
+        column_order=["扫描目标", "时间", "哈希", "查看", "下载", "删除"],
+        column_config={
+            "扫描目标": st.column_config.TextColumn("扫描目标", width=720),
+            "时间": st.column_config.TextColumn("时间", width=220),
+            "哈希": st.column_config.TextColumn("哈希", width=160),
+            "查看": st.column_config.ButtonColumn(
+                "查看",
+                on_click=_handle_history_action,
+                args=(session_key, "view"),
+                key="history_view_click",
+                width=48,
+                alignment="center",
+            ),
+            "下载": st.column_config.ButtonColumn(
+                "下载",
+                on_click=_handle_history_action,
+                args=(session_key, "download"),
+                key="history_download_click",
+                width=48,
+                alignment="center",
+            ),
+            "删除": st.column_config.ButtonColumn(
+                "删除",
+                on_click=_handle_history_action,
+                args=(session_key, "delete"),
+                key="history_delete_click",
+                width=48,
+                alignment="center",
+            ),
+        },
+        key="history_table",
     )
-    with st.container(key="history_grid", border=False):
-        header = st.columns([2.8, 1.6, 1.3, 1.3])
-        for column, title in zip(header, ["扫描目标", "时间", "哈希", "操作"]):
-            column.markdown(f"**{title}**")
-        for item in page_results:
-            cols = st.columns([2.8, 1.6, 1.3, 1.3])
-            cols[0].write(Path(item["output_dir"]).name)
-            cols[1].write(item["label"].split("|")[-1].strip())
-            cols[2].write((item.get("project_hash") or "")[:12])
-            view_col, download_col, delete_col = cols[3].columns(3)
-            if view_col.button("", key=f"history_view_{item['label']}", icon=":material/visibility:", help="查看"):
-                st.session_state[session_key] = item["label"]
-                st.session_state["result_active_tab"] = "漏洞与风险"
-                st.rerun()
-            report_path = item.get("report_path") or ""
-            if report_path and os.path.exists(report_path):
-                download_col.download_button(
-                    "",
-                    data=Path(report_path).read_bytes(),
-                    file_name=Path(report_path).name,
-                    mime="text/plain",
-                    key=f"history_download_{item['label']}",
-                    icon=":material/download:",
-                    help="下载",
-                )
-            else:
-                download_col.button("", key=f"history_download_disabled_{item['label']}", icon=":material/download:", help="下载", disabled=True)
-            if delete_col.button("", key=f"history_delete_{item['label']}", icon=":material/delete:", help="删除"):
-                output_dir = Path(item["output_dir"])
-                try:
-                    if output_dir.exists():
-                        shutil.rmtree(output_dir, ignore_errors=True)
-                    latest = st.session_state.get("latest_result")
-                    if latest and latest.get("output_dir") == str(output_dir):
-                        st.session_state.latest_result = None
-                    if st.session_state.get(session_key) == item["label"]:
-                        st.session_state[session_key] = None
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"删除失败：{e}")
+    error = st.session_state.pop("history_action_error", None)
+    if error:
+        st.error(error)
+    download_item = st.session_state.pop("history_download_item", None)
+    if download_item:
+        report_path = download_item.get("report_path") or ""
+        if report_path:
+            _trigger_file_download(report_path)
     _render_pager(total, page_size, page_key, widget_suffix="_history")
 
 
@@ -1461,3 +1546,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
