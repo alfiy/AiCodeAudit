@@ -5,6 +5,7 @@ import shutil
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -28,6 +29,12 @@ st.set_page_config(
 def inject_global_styles():
     css_path = Path(__file__).parent / "static" / "styles.css"
     css = css_path.read_text(encoding="utf-8")
+    st.markdown(
+        """
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+        """,
+        unsafe_allow_html=True,
+    )
     st.markdown(f"<style>\n{css}\n</style>", unsafe_allow_html=True)
 
 
@@ -672,21 +679,122 @@ def get_selected_result(workspace: Path):
     return results
 
 
-def _render_result_selector(results: list[dict], session_key: str = "selected_result_label") -> dict | None:
-    """以卡片列表形式展示历史分析结果，每条自带查看与删除操作。"""
+def _render_pager(total: int, page_size: int, page_state_key: str, widget_suffix: str = "") -> tuple[int, int]:
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current = int(st.session_state.get(page_state_key, 1) or 1)
+    if current > total_pages:
+        current = total_pages
+    if current < 1:
+        current = 1
+    st.session_state[page_state_key] = current
+
+    start = (current - 1) * page_size
+    end = min(start + page_size, total)
+    widget_key = f"{page_state_key}{widget_suffix}"
+
+    prev_col, info_col, next_col, jump_col = st.columns([1, 1.6, 1, 1.6])
+    with prev_col:
+        if st.button("上一页", key=f"{widget_key}_prev", icon=":material/chevron_left:", disabled=current <= 1, width="stretch"):
+            st.session_state[page_state_key] = current - 1
+            st.rerun()
+    with info_col:
+        st.markdown(
+            f"<div style='text-align:center;padding-top:0.45rem'>第 {current} / {total_pages} 页</div>",
+            unsafe_allow_html=True,
+        )
+    with next_col:
+        if st.button("下一页", key=f"{widget_key}_next", icon=":material/chevron_right:", disabled=current >= total_pages, width="stretch"):
+            st.session_state[page_state_key] = current + 1
+            st.rerun()
+    with jump_col:
+        jump_input_col, jump_btn_col = st.columns([1.2, 1])
+        with jump_input_col:
+            jump = st.number_input(
+                "跳转页",
+                min_value=1,
+                max_value=total_pages,
+                value=current,
+                key=f"{widget_key}_jump_value",
+                label_visibility="collapsed",
+            )
+        with jump_btn_col:
+            if st.button("跳转", key=f"{widget_key}_go", width="stretch"):
+                st.session_state[page_state_key] = int(jump)
+                st.rerun()
+
+    shown_start = start + 1 if total else 0
+    st.caption(f"显示 {shown_start}-{end}，共 {total} 条")
+    return start, end
+
+
+def _render_result_selector(results: list[dict], session_key: str = "selected_result_label", show_cards: bool = True) -> dict | None:
+    """以可切换卡片展示当前扫描和历史扫描结果。"""
     if not results:
         return None
 
-    # 默认选中最新一条
     if st.session_state.get(session_key) not in {item["label"] for item in results}:
         st.session_state[session_key] = results[0]["label"]
 
-    st.markdown("#### 历史分析结果")
-    st.caption("点击「查看」切换当前结果，点击「下载」保存审计日志，点击「删除」可移除该次审计记录。")
+    tab_key = f"{session_key}_scan_tab"
+    st.session_state.setdefault(tab_key, "当前扫描")
 
+    if not show_cards:
+        if st.session_state.get(session_key) not in {item["label"] for item in results}:
+            st.session_state[session_key] = results[0]["label"]
+        selected_label = st.session_state.get(session_key)
+        return next((item for item in results if item["label"] == selected_label), None)
+
+    st.markdown("#### 审计结果")
+
+    current_tab, history_tab = st.columns([1.3, 1.3])
+    with current_tab:
+        if st.button(
+            "当前扫描",
+            key=f"{session_key}_tab_current",
+            type="primary" if st.session_state[tab_key] == "当前扫描" else "secondary",
+            icon=":material/radar:",
+            width="stretch",
+        ):
+            st.session_state[tab_key] = "当前扫描"
+            st.rerun()
+    with history_tab:
+        if st.button(
+            "历史扫描",
+            key=f"{session_key}_tab_history",
+            type="primary" if st.session_state[tab_key] == "历史扫描" else "secondary",
+            icon=":material/history:",
+            width="stretch",
+        ):
+            st.session_state[tab_key] = "历史扫描"
+            st.rerun()
+
+    if st.session_state[tab_key] == "当前扫描":
+        visible_results = results[:1]
+        if show_cards:
+            st.caption("当前展示最新一次扫描结果。")
+    else:
+        visible_results = results[1:] if len(results) > 1 else []
+        if show_cards:
+            st.caption("当前展示历史扫描结果。点击「查看」可切换到该次审计。")
+
+    page_state_key = f"{session_key}_page"
+    page_size = 10
+
+    if not visible_results:
+        st.info("还没有历史扫描结果。")
+        selected_label = st.session_state.get(session_key)
+        return next((item for item in results if item["label"] == selected_label), None)
+
+    current_page = max(1, int(st.session_state.get(page_state_key, 1)))
+    total_pages = max(1, (len(visible_results) + page_size - 1) // page_size)
+    if current_page > total_pages:
+        current_page = total_pages
+        st.session_state[page_state_key] = current_page
+    start = (current_page - 1) * page_size
+    page_results = visible_results[start:start + page_size]
     pending = st.session_state.get("pending_delete_label")
 
-    for item in results:
+    for item in page_results:
         is_selected = item["label"] == st.session_state.get(session_key)
         with st.container(border=True):
             c1, c2, c3, c4 = st.columns([5.2, 1.1, 1.1, 1.1])
@@ -698,7 +806,7 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
                 hash_short = (item.get("project_hash") or "")[:12]
                 st.caption(f"哈希：`{hash_short}`　·　目录：`{Path(item['output_dir']).name}`")
             with c2:
-                if st.button("查看", key=f"view_{session_key}_{item['label']}", width="stretch", disabled=is_selected):
+                if st.button("查看", key=f"view_{session_key}_{item['label']}", icon=":material/visibility:", width="stretch", disabled=is_selected):
                     st.session_state[session_key] = item["label"]
                     st.rerun()
             with c3:
@@ -711,16 +819,16 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
                         file_name=report_name,
                         mime="text/plain",
                         key=f"download_{session_key}_{item['label']}",
+                        icon=":material/download:",
                         width="stretch",
                     )
                 else:
-                    st.button("下载", key=f"download_disabled_{session_key}_{item['label']}", width="stretch", disabled=True)
+                    st.button("下载", key=f"download_disabled_{session_key}_{item['label']}", icon=":material/download:", width="stretch", disabled=True)
             with c4:
-                if st.button("删除", key=f"del_{session_key}_{item['label']}", width="stretch", type="secondary"):
+                if st.button("删除", key=f"del_{session_key}_{item['label']}", icon=":material/delete:", width="stretch", type="secondary"):
                     st.session_state.pending_delete_label = item["label"]
                     st.rerun()
 
-            # 该条目的删除确认
             if pending == item["label"]:
                 st.warning("确认永久删除此分析结果？此操作不可恢复。")
                 cy, cn = st.columns(2)
@@ -745,14 +853,270 @@ def _render_result_selector(results: list[dict], session_key: str = "selected_re
                         st.session_state.pending_delete_label = None
                         st.rerun()
 
+    if len(visible_results) > page_size:
+        _render_pager(len(visible_results), page_size, page_state_key, widget_suffix="_bottom")
+
     selected_label = st.session_state.get(session_key)
     return next((item for item in results if item["label"] == selected_label), None)
 
 
+def _render_stat_cards(risk_rows: list[dict], subtitle: str):
+    level_counts = {level: sum(1 for row in risk_rows if row["level"] == level) for level in ["高危", "中危", "低危", "信息"]}
+    card_cols = st.columns(4)
+    card_data = [
+        ("漏洞 / 风险", str(len(risk_rows)), subtitle),
+        ("高危", str(level_counts["高危"]), "需要优先处理"),
+        ("中危 / 低危", f"{level_counts['中危']} / {level_counts['低危']}", "建议复核"),
+        ("信息", str(level_counts["信息"]), "低优先级提示"),
+    ]
+    for column, (label, value, sub) in zip(card_cols, card_data):
+        with column:
+            st.markdown(
+                f"""
+                <div class="yakit-card">
+                  <div class="label">{label}</div>
+                  <div class="value">{value}</div>
+                  <div class="sub">{sub}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def _load_result_rows(item: dict) -> list[dict]:
+    report_path = item.get("report_path") or ""
+    if not report_path or not os.path.exists(report_path):
+        return []
+    rows = []
+    for section in parse_report(read_text_file(report_path)):
+        for finding in section["findings"]:
+            rows.append({
+                "file": section["file_path"],
+                "finding": finding,
+                "raw": section.get("raw", ""),
+                "level": get_finding_level_label(finding["type"]),
+                "pass": is_pass_finding(finding),
+                "source": item["label"],
+            })
+    return rows
+
+
+def _render_risk_table(all_rows: list[dict], selected: dict):
+    finding_page_size = 10
+    st.markdown('<div class="filter-gap"></div>', unsafe_allow_html=True)
+    tool_cols = st.columns([2.6, 1.8, 1.0])
+    with tool_cols[0]:
+        keyword = st.text_input("搜索", placeholder="请输入关键词搜索", label_visibility="collapsed", key="risk_keyword")
+    with tool_cols[1]:
+        selected_levels = st.multiselect(
+            "等级",
+            ["高危", "中危", "低危", "信息"],
+            default=["高危", "中危", "低危", "信息"],
+            label_visibility="collapsed",
+            key="risk_levels",
+        )
+    with tool_cols[2]:
+        show_passed = st.toggle("显示通过", value=False, key="risk_show_passed")
+
+    visible_rows = []
+    for row in all_rows:
+        if row["pass"] and not show_passed:
+            continue
+        if not row["pass"] and row["level"] not in selected_levels:
+            continue
+        haystack = " ".join([
+            row["file"],
+            row["finding"].get("type", ""),
+            row["finding"].get("feature", ""),
+            row["finding"].get("vector", ""),
+        ]).lower()
+        if keyword and keyword.strip().lower() not in haystack:
+            continue
+        visible_rows.append(row)
+
+    visible_rows.sort(key=lambda row: get_finding_priority(row["finding"]["type"]))
+    if not visible_rows:
+        st.info("当前筛选条件下没有可展示结果。")
+        return
+
+    filter_sig = f"{keyword}|{tuple(selected_levels)}|{show_passed}|{len(visible_rows)}"
+    if st.session_state.get("finding_filter_sig") != filter_sig:
+        st.session_state["finding_filter_sig"] = filter_sig
+        st.session_state["finding_page"] = 1
+    start = (max(1, int(st.session_state.get("finding_page", 1))) - 1) * finding_page_size
+    page_rows = visible_rows[start:start + finding_page_size]
+
+    table_rows = []
+    for index, row in enumerate(page_rows, start=start + 1):
+        finding = row["finding"]
+        finding_key = f"{row['file']}|{finding['type']}|{finding.get('location')}"
+        table_rows.append({
+            "index": index,
+            "name": Path(row["file"]).name,
+            "type": finding["type"],
+            "level": row["level"],
+            "location": finding.get("location") or "-",
+            "key": finding_key,
+            "row": row,
+        })
+
+    display_rows = [{
+        "序号": item["index"],
+        "扫描目标": item["name"],
+        "漏洞类型": item["type"],
+        "等级": item["level"],
+        "位置": item["location"],
+    } for item in table_rows]
+    selection = st.dataframe(
+        pd.DataFrame(display_rows),
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="risk_table",
+    )
+    selected_rows = selection.selection.rows if selection and selection.selection else []
+    if selected_rows:
+        open_item = table_rows[selected_rows[0]]
+        open_key = open_item["key"]
+        if st.session_state.get("closed_finding_key") != open_key:
+            finding = open_item["row"]["finding"]
+            badge_class = get_finding_badge_class(finding["type"])
+            with st.container(border=True):
+                st.markdown('<div class="detail-anchor"></div>', unsafe_allow_html=True)
+                title_col, close_col = st.columns([8, 0.7])
+                with title_col:
+                    st.markdown(
+                        f"""
+                        <div class="detail-head">
+                          <div class="detail-title">{finding['type']}</div>
+                          <span class="level-tag {badge_class}">{open_item['level']}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                with close_col:
+                    if st.button("×", key="close_finding_detail", help="关闭", type="tertiary"):
+                        st.session_state["closed_finding_key"] = open_key
+                        st.rerun()
+                st.markdown(f'<div class="detail-path">{open_item["row"]["file"]}</div>', unsafe_allow_html=True)
+                if finding.get("feature"):
+                    st.markdown('<div class="detail-label">代码特征</div>', unsafe_allow_html=True)
+                    st.code(finding["feature"], language="text")
+                for label, value in (
+                    ("攻击向量", finding.get("vector")),
+                    ("潜在影响", finding.get("impact")),
+                    ("修复建议", finding.get("fix")),
+                ):
+                    if value:
+                        st.markdown(
+                            f'<div class="detail-label">{label}</div><div class="detail-text">{value}</div>',
+                            unsafe_allow_html=True,
+                        )
+    if len(visible_rows) > finding_page_size:
+        _render_pager(len(visible_rows), finding_page_size, "finding_page", widget_suffix="_bottom")
+
+
+def _render_history_table(results: list[dict], session_key: str):
+    page_size = 10
+    page_key = "history_scan_page"
+    total = len(results)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current = max(1, int(st.session_state.get(page_key, 1) or 1))
+    if current > total_pages:
+        current = total_pages
+        st.session_state[page_key] = current
+    start = (current - 1) * page_size
+    page_results = results[start:start + page_size]
+
+    st.markdown(
+        """
+        <style>
+        .st-key-history_grid {
+          border: 1px solid #e6e6e6 !important;
+          border-radius: 8px !important;
+          background: #ffffff !important;
+          padding: 0 !important;
+          overflow: hidden;
+        }
+        .st-key-history_grid [data-testid="stVerticalBlock"] {
+          gap: 0 !important;
+        }
+        .st-key-history_grid [data-testid="stHorizontalBlock"] {
+          border-bottom: 1px solid #f0f0f0 !important;
+          margin: 0 !important;
+          padding: 0.15rem 0.45rem !important;
+          align-items: center !important;
+          min-height: 2.35rem;
+        }
+        .st-key-history_grid [data-testid="stHorizontalBlock"]:first-of-type {
+          background: #fafafa !important;
+          min-height: 2.5rem;
+        }
+        .st-key-history_grid [data-testid="stMarkdownContainer"] p,
+        .st-key-history_grid [data-testid="stText"] {
+          margin: 0 !important;
+          font-size: 0.9rem !important;
+          color: #1f2937;
+        }
+        .st-key-history_grid button,
+        .st-key-history_grid [data-testid="stBaseButton-secondary"],
+        .st-key-history_grid [data-testid="stDownloadButton"] button {
+          min-height: 1.7rem !important;
+          height: 1.7rem !important;
+          padding: 0 0.35rem !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(key="history_grid", border=False):
+        header = st.columns([2.8, 1.6, 1.3, 1.3])
+        for column, title in zip(header, ["扫描目标", "时间", "哈希", "操作"]):
+            column.markdown(f"**{title}**")
+        for item in page_results:
+            cols = st.columns([2.8, 1.6, 1.3, 1.3])
+            cols[0].write(Path(item["output_dir"]).name)
+            cols[1].write(item["label"].split("|")[-1].strip())
+            cols[2].write((item.get("project_hash") or "")[:12])
+            view_col, download_col, delete_col = cols[3].columns(3)
+            if view_col.button("", key=f"history_view_{item['label']}", icon=":material/visibility:", help="查看"):
+                st.session_state[session_key] = item["label"]
+                st.session_state["result_active_tab"] = "漏洞与风险"
+                st.rerun()
+            report_path = item.get("report_path") or ""
+            if report_path and os.path.exists(report_path):
+                download_col.download_button(
+                    "",
+                    data=Path(report_path).read_bytes(),
+                    file_name=Path(report_path).name,
+                    mime="text/plain",
+                    key=f"history_download_{item['label']}",
+                    icon=":material/download:",
+                    help="下载",
+                )
+            else:
+                download_col.button("", key=f"history_download_disabled_{item['label']}", icon=":material/download:", help="下载", disabled=True)
+            if delete_col.button("", key=f"history_delete_{item['label']}", icon=":material/delete:", help="删除"):
+                output_dir = Path(item["output_dir"])
+                try:
+                    if output_dir.exists():
+                        shutil.rmtree(output_dir, ignore_errors=True)
+                    latest = st.session_state.get("latest_result")
+                    if latest and latest.get("output_dir") == str(output_dir):
+                        st.session_state.latest_result = None
+                    if st.session_state.get(session_key) == item["label"]:
+                        st.session_state[session_key] = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"删除失败：{e}")
+    _render_pager(total, page_size, page_key, widget_suffix="_history")
+
+
 def render_result_list_page(workspace: Path):
     render_page_hero(
-        "审计结果可视化",
-        "聚焦查看结构化风险项、攻击向量与修复建议。默认会隐藏纯“审计通过”块，让你把注意力留给真正需要处理的结果。",
+        "审计结果",
+        "聚焦查看结构化风险项、攻击向量与修复建议。默认会隐藏纯“审计通过”块。",
         "Result Review",
     )
     results = get_selected_result(workspace)
@@ -760,135 +1124,44 @@ def render_result_list_page(workspace: Path):
         st.info("还没有可展示的结果，请先在“分析”页面执行一次审计。")
         return
 
-    selected = _render_result_selector(results, session_key="selected_result_label")
+    selected = _render_result_selector(results, session_key="selected_result_label", show_cards=False)
     if not selected:
-        st.info("请从上方列表中选择一个分析结果。")
+        st.info("请选择一个分析结果。")
         return
 
-    st.divider()
+    current_rows = _load_result_rows(selected)
+    current_risks = [row for row in current_rows if not row["pass"]]
+    history_rows = []
+    for item in results:
+        history_rows.extend(row for row in _load_result_rows(item) if not row["pass"])
 
-    render_stat_strip([
-        ("项目哈希", selected["project_hash"][:12]),
-        ("GraphML", os.path.basename(selected["graph_path"])),
-        ("报告日志", os.path.basename(selected["report_path"]) if selected["report_path"] else "未生成"),
-    ])
+    st.session_state.setdefault("result_active_tab", "漏洞与风险")
+    tab_col, history_col = st.columns([1.6, 1.2])
+    with tab_col:
+        if st.button(
+            f"漏洞与风险 ({len(current_risks)})",
+            key="tab_risk",
+            type="primary" if st.session_state["result_active_tab"] == "漏洞与风险" else "secondary",
+            width="stretch",
+        ):
+            st.session_state["result_active_tab"] = "漏洞与风险"
+            st.rerun()
+    with history_col:
+        if st.button(
+            "历史扫描",
+            key="tab_history",
+            type="primary" if st.session_state["result_active_tab"] == "历史扫描" else "secondary",
+            width="stretch",
+        ):
+            st.session_state["result_active_tab"] = "历史扫描"
+            st.rerun()
 
-    if not selected["report_path"] or not os.path.exists(selected["report_path"]):
-        st.warning("当前结果没有可用的审计日志。")
-        return
-
-    report_text = read_text_file(selected["report_path"])
-    parsed_sections = parse_report(report_text)
-    show_passed = st.toggle("显示审计通过结果", value=False, help="默认隐藏仅包含“审计通过”的审计块")
-    show_raw_blocks = st.toggle("显示原始审计块", value=False, help="关闭可减少大量结果时的页面卡顿")
-    selected_levels = st.multiselect(
-        "风险等级筛选",
-        ["高危", "中危", "低危", "信息"],
-        default=["高危", "中危", "低危", "信息"],
-        help="只显示选中的风险等级",
-    )
-    sort_mode = st.selectbox(
-        "排序方式",
-        ["按风险等级（高到低）", "按文件顺序"],
-        index=0,
-        help="控制结果的展示顺序",
-    )
-
-    if not parsed_sections:
-        st.text_area("原始报告", report_text, height=400)
-        return
-
-    visible_sections = []
-    for section in parsed_sections:
-        filtered_findings = []
-        for finding in section["findings"]:
-            if not show_passed and is_pass_finding(finding):
-                continue
-            if is_pass_finding(finding):
-                filtered_findings.append(finding)
-                continue
-            if is_incomplete_finding(finding):
-                filtered_findings.append(finding)
-                continue
-            if get_finding_level_label(finding["type"]) in selected_levels:
-                filtered_findings.append(finding)
-
-        if filtered_findings:
-            visible_sections.append({
-                **section,
-                "findings": filtered_findings,
-            })
-
-    total_findings = sum(len(section["findings"]) for section in parsed_sections)
-    visible_findings = sum(len(section["findings"]) for section in visible_sections)
-
-    render_stat_strip([
-        ("当前展示审计块", str(len(visible_sections))),
-        ("当前展示结果数", str(visible_findings)),
-        ("原始结果总数", str(total_findings)),
-    ])
-
-    if not visible_sections:
-        st.info("当前筛选条件下没有可展示结果。你可以调整风险等级筛选，或打开“显示审计通过结果”查看完整输出。")
-        return
-
-    if sort_mode == "按风险等级（高到低）":
-        visible_sections = sorted(
-            visible_sections,
-            key=lambda section: min(
-                (get_finding_priority(finding["type"]) for finding in section["findings"] if not is_pass_finding(finding)),
-                default=99,
-            ),
-        )
-
-    for section in visible_sections:
-        st.markdown(f"#### {section['file_path']}")
-        if not section["findings"]:
-            st.code(section["raw"], language="text")
-            continue
-
-        findings_to_render = section["findings"]
-        if sort_mode == "按风险等级（高到低）":
-            findings_to_render = sorted(findings_to_render, key=lambda finding: get_finding_priority(finding["type"]))
-
-        for finding in findings_to_render:
-            badge_class = get_finding_badge_class(finding["type"])
-            level_label = get_finding_level_label(finding["type"])
-            st.markdown(
-                f"""
-                <div class="finding-card {badge_class}">
-                  <div class="finding-header">
-                    <h4 class="finding-title {badge_class}">{finding['type']}</h4>
-                    <div class="finding-meta">
-                      <span class="badge {badge_class}">{level_label}</span>
-                      <span class="badge">{finding['location'] or '-'}</span>
-                    </div>
-                  </div>
-                  <div class="field-label">代码特征</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if finding["feature"]:
-                st.code(finding["feature"], language="text")
-            else:
-                st.markdown('<div class="field-text">-</div>', unsafe_allow_html=True)
-            if finding["vector"]:
-                st.markdown('<div class="field-label">攻击向量</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="field-text">{finding["vector"]}</div>', unsafe_allow_html=True)
-            if finding["impact"]:
-                st.markdown('<div class="field-label">潜在影响</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="field-text">{finding["impact"]}</div>', unsafe_allow_html=True)
-            if finding["fix"]:
-                st.markdown('<div class="field-label">修复建议</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="field-text">{finding["fix"]}</div>', unsafe_allow_html=True)
-            if show_raw_blocks:
-                raw_preview = section["raw"]
-                if len(raw_preview) > 4000:
-                    raw_preview = raw_preview[:4000] + "\n\n...（原始审计块过长，已截断显示）"
-                with st.expander("查看本文件原始审计块"):
-                    st.code(raw_preview, language="text")
-        st.divider()
+    if st.session_state["result_active_tab"] == "历史扫描":
+        _render_stat_cards(history_rows, "全部历史扫描风险总数")
+        _render_history_table(results, session_key="selected_result_label")
+    else:
+        _render_stat_cards(current_risks, "当前结果风险总数")
+        _render_risk_table(current_rows, selected)
 
 
 def render_graph_page(workspace: Path):
