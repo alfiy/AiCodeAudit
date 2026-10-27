@@ -18,6 +18,7 @@ from matplotlib import font_manager
 from audit.agent import refresh_llm_client
 from audit.service import run_audit
 from config import C
+from graph_atlas import cached_graph_html
 import base64
 
 
@@ -495,100 +496,6 @@ def parse_legacy_report_section(section: str):
         "findings": findings,
         "raw": section,
     }
-
-
-def build_graph_html(graph_path: str) -> str:
-    graph = nx.read_graphml(graph_path)
-    nodes = []
-    edges = []
-
-    for node_id, attrs in graph.nodes(data=True):
-        label = attrs.get("source_name") or str(node_id)
-        title = (
-            f"文件: {attrs.get('name', '')}<br>"
-            f"路径: {attrs.get('path', '')}<br>"
-            f"描述: {attrs.get('desc', '')}<br>"
-            f"行号: {attrs.get('start_code_line', '')}-{attrs.get('end_code_line', '')}"
-        )
-        nodes.append({
-            "id": str(node_id),
-            "label": label,
-            "title": title,
-            "group": attrs.get("name", "default"),
-            "shape": "dot",
-            "size": 14 if attrs.get("source_code") else 8,
-        })
-
-    for source, target in graph.edges():
-        edges.append({
-            "from": str(source),
-            "to": str(target),
-            "arrows": "to",
-        })
-
-    return f"""
-    <div id="graph-status" style="padding:8px 12px;color:#475569;font-family:Microsoft YaHei;">图谱加载中...</div>
-    <div id="graph" style="width:100%;height:760px;border-radius:18px;border:1px solid #e6e8ef;background:linear-gradient(180deg,#fbfbfd 0%,#f4f6fb 100%);"></div>
-    <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.2/dist/vis-network.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-network@9.1.2/dist/dist/vis-network.min.css"/>
-    <script>
-      const status = document.getElementById("graph-status");
-      const renderGraph = () => {{
-        if (typeof vis === "undefined") {{
-          status.innerText = "图谱脚本加载失败，页面已回退到下方列表视图。";
-          return;
-        }}
-        const nodes = new vis.DataSet({json.dumps(nodes, ensure_ascii=False)});
-        const edges = new vis.DataSet({json.dumps(edges, ensure_ascii=False)});
-        const container = document.getElementById("graph");
-        const data = {{ nodes, edges }};
-        const options = {{
-          autoResize: true,
-          interaction: {{
-            hover: true,
-            navigationButtons: true,
-            keyboard: true
-          }},
-          physics: {{
-            enabled: true,
-            solver: "forceAtlas2Based",
-            stabilization: {{ iterations: 300 }}
-          }},
-          layout: {{
-            improvedLayout: true
-          }},
-          nodes: {{
-            borderWidth: 1,
-            borderWidthSelected: 2,
-            color: {{
-              background: "#ff8a65",
-              border: "#d85d3c",
-              highlight: {{ background: "#ff7043", border: "#b94722" }}
-            }},
-            font: {{
-              color: "#1f2a44",
-              size: 14,
-              face: "Microsoft YaHei"
-            }}
-          }},
-          edges: {{
-            color: {{ color: "#94a3b8", highlight: "#f97316" }},
-            smooth: {{ type: "dynamic" }}
-          }},
-          groups: {{
-            default: {{ color: {{ background: "#ff8a65", border: "#d85d3c" }} }}
-          }}
-        }};
-        const network = new vis.Network(container, data, options);
-        network.once("stabilizationIterationsDone", function () {{
-          network.fit({{ animation: true }});
-          status.innerText = "图谱加载完成，可拖拽、缩放和悬停查看详情。";
-        }});
-      }};
-      window.addEventListener("load", renderGraph);
-      setTimeout(renderGraph, 400);
-    </script>
-    """
 
 
 def render_graph_fallback(graph: nx.DiGraph):
@@ -1323,18 +1230,20 @@ def render_graph_page(workspace: Path):
         ("边数", str(graph.number_of_edges())),
         ("结果目录", Path(selected["output_dir"]).name),
     ])
-
-    graph_tab, static_tab, node_tab, edge_tab = st.tabs(["交互图谱", "静态预览", "节点列表", "边列表"])
-
-    with graph_tab:
-        html_path = Path(selected["output_dir"]) / "_graph_preview.html"
-        html_path.write_text(build_graph_html(selected["graph_path"]), encoding="utf-8")
+    view = st.radio(
+        "图谱视图",
+        ["交互图谱", "静态预览", "节点列表", "边列表"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="graph_view",
+    )
+    if view == "交互图谱":
+        st.caption("首次打开会计算一次力导向布局并缓存。之后拖动滑杆只切换显示，不会重算。默认 30%，拉到 100% 显示全部。")
+        html_path = cached_graph_html(selected["graph_path"])
         st.iframe(html_path, height=820)
-
-    with static_tab:
+    elif view == "静态预览":
         render_graph_fallback(graph)
-
-    with node_tab:
+    elif view == "节点列表":
         node_df = build_node_dataframe(graph)
         search_text = st.text_input("搜索节点 / 文件 / 路径", key="node_search").strip().lower()
         if search_text:
@@ -1343,10 +1252,8 @@ def render_graph_page(workspace: Path):
                 .any(axis=1)
             ]
         st.dataframe(node_df, width="stretch", height=520)
-
-    with edge_tab:
-        edge_df = build_edge_dataframe(graph)
-        st.dataframe(edge_df, width="stretch", height=520)
+    else:
+        st.dataframe(build_edge_dataframe(graph), width="stretch", height=520)
 
 
 def _cfg_int(name: str, default: int) -> int:
@@ -1592,4 +1499,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
