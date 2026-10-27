@@ -18,7 +18,7 @@ from matplotlib import font_manager
 from audit.agent import refresh_llm_client
 from audit.service import run_audit
 from config import C
-from graph_atlas import cached_graph_html
+from graph_atlas import cached_graph_html, cached_static_graph_html
 import base64
 
 
@@ -505,18 +505,22 @@ def render_graph_fallback(graph: nx.DiGraph):
     plt.rcParams["axes.unicode_minus"] = False
     sample_nodes = list(graph.nodes())[:120]
     subgraph = graph.subgraph(sample_nodes).copy()
-    fig, ax = plt.subplots(figsize=(14, 9))
-    pos = nx.spring_layout(subgraph, seed=42, k=0.9)
-    nx.draw_networkx(
+    fig, ax = plt.subplots(figsize=(16, 10))
+    pos = nx.spring_layout(subgraph, seed=42, k=1.4)
+    labels = {
+        node_id: (attrs.get("source_name") or str(node_id))
+        for node_id, attrs in subgraph.nodes(data=True)
+    }
+    nx.draw_networkx_edges(subgraph, pos=pos, ax=ax, width=0.6, arrows=False, edge_color="#94a3b8")
+    nx.draw_networkx_nodes(subgraph, pos=pos, ax=ax, node_size=180, node_color="#ff8a65")
+    nx.draw_networkx_labels(
         subgraph,
         pos=pos,
+        labels=labels,
         ax=ax,
-        with_labels=False,
-        node_size=70,
-        width=0.6,
-        arrows=False,
-        node_color="#ff8a65",
-        edge_color="#94a3b8",
+        font_size=8,
+        font_color="#1f2a44",
+        font_family=font_family or "DejaVu Sans",
     )
     title = "依赖图谱静态预览（前120个节点）" if font_family else "Dependency graph preview (first 120 nodes)"
     ax.set_title(title, fontsize=14, fontfamily=font_family or "DejaVu Sans")
@@ -1242,7 +1246,9 @@ def render_graph_page(workspace: Path):
         html_path = cached_graph_html(selected["graph_path"])
         st.iframe(html_path, height=820)
     elif view == "静态预览":
-        render_graph_fallback(graph)
+        st.caption("静态预览只显示前 120 个高优先级节点。可滚轮缩放，点击节点查看直接相连，返回全局后恢复。")
+        html_path = cached_static_graph_html(selected["graph_path"])
+        st.iframe(html_path, height=820)
     elif view == "节点列表":
         node_df = build_node_dataframe(graph)
         search_text = st.text_input("搜索节点 / 文件 / 路径", key="node_search").strip().lower()
