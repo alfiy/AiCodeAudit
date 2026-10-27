@@ -295,7 +295,7 @@ def build_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: d
                 "hidden": cluster_of.get(source_id, -1) != cluster_of.get(target_id, -2),
                 "rank": max(rank_by_id.get(source_id, 0), rank_by_id.get(target_id, 0)),
             })
-    graph_id = hashlib.sha1(("v14-hover|" + str(Path(graph_path).resolve())).encode("utf-8")).hexdigest()[:16]
+    graph_id = hashlib.sha1(("v15-pixel|" + str(Path(graph_path).resolve())).encode("utf-8")).hexdigest()[:16]
     default_pct = 15 if len(nodes) > 300 else 30
     for node in nodes:
         if not node.get("color"):
@@ -555,21 +555,45 @@ def build_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: d
         }};
         network.on("zoom", lockVisualSize);
         lockVisualSize();
-        network.on("hoverNode", (params) => {{
-          if (focusId) return;
-          showRelated(params.node);
+        const nearestNode = (domPoint) => {{
+          if (!domPoint || !network) return null;
+          const positions = network.getPositions();
+          let best = null;
+          let bestDist = 22;
+          Object.keys(positions).forEach((id) => {{
+            const node = nodesDS.get(id);
+            if (!node || node.hidden) return;
+            const dom = network.canvasToDOM(positions[id]);
+            const dist = Math.hypot(dom.x - domPoint.x, dom.y - domPoint.y);
+            if (dist < bestDist) {{
+              bestDist = dist;
+              best = id;
+            }}
+          }});
+          return best;
+        }};
+        const canvas = document.getElementById("graph").querySelector("canvas");
+        const pointerOf = (event) => {{
+          const rect = canvas.getBoundingClientRect();
+          return {{ x: event.clientX - rect.left, y: event.clientY - rect.top }};
+        }};
+        canvas.addEventListener("mousemove", (event) => {{
+          if (!ready || focusId) return;
+          const nodeId = nearestNode(pointerOf(event));
+          if (nodeId === hoverId) return;
+          if (nodeId) showRelated(nodeId);
+          else hideRelated();
         }});
-        network.on("blurNode", () => {{
-          if (focusId) return;
-          hideRelated();
+        canvas.addEventListener("mouseleave", () => {{
+          if (!focusId) hideRelated();
         }});
-        status.innerText = statusText({default_pct}, shown, "悬停会显示关联节点。点击查看依赖图。");
-        network.on("click", (params) => {{
-          if (!ready) return;
-          const nodeId = (params.nodes && params.nodes[0]) || hoverId;
+        canvas.addEventListener("click", (event) => {{
+          if (!ready || focusId) return;
+          const nodeId = nearestNode(pointerOf(event)) || hoverId;
           if (!nodeId) return;
           focusNode(nodeId);
         }});
+        status.innerText = statusText({default_pct}, shown, "悬停按屏幕距离识别节点，放大后也能点中。");
         backBtn.addEventListener("click", restoreGlobal);
         slider.addEventListener("input", () => {{
           if (focusId) return;
@@ -585,7 +609,7 @@ def build_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: d
 
 def cached_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: dict[str, str] | None = None, resolved: nx.DiGraph | None = None) -> Path:
     source = Path(graph_path)
-    signature = hashlib.sha1(("v14-hover|" + ",".join(sorted(keep_ids or []))).encode("utf-8")).hexdigest()[:10]
+    signature = hashlib.sha1(("v15-pixel|" + ",".join(sorted(keep_ids or []))).encode("utf-8")).hexdigest()[:10]
     html_path = source.parent / f"_graph_preview_focus_{signature}.html"
     if html_path.exists() and html_path.stat().st_mtime >= source.stat().st_mtime:
         return html_path
