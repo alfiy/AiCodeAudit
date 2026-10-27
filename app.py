@@ -1272,7 +1272,7 @@ def render_graph_page(workspace: Path):
         key="graph_view",
     )
     if view == "交互图谱":
-        st.caption("节点大小和名称字号固定，不随缩放变化。名称只在鼠标悬停时显示，避免互相遮盖。")
+        st.caption("只展示漏洞相关节点。被大量调用的公共节点已排除，悬停显示关联，点击查看依赖。")
         html_path = cached_graph_html(selected["graph_path"], keep_ids, risks, resolved)
         st.iframe(html_path, height=820)
     elif view == "静态预览":

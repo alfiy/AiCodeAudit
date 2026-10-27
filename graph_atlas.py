@@ -153,15 +153,38 @@ def resolve_project_graph(graph: nx.DiGraph, allowed: set[str] | None = None) ->
     return resolved
 
 
-def expand_related_nodes(graph: nx.DiGraph, seeds: set[str], hops: int = 2) -> set[str]:
+_UTILITY_NAMES = {
+    "apireturn", "getes", "success", "fail", "error", "json", "response",
+    "ajaxreturn", "returnjson", "ret", "ok", "result", "output",
+}
+
+
+def low_value_hubs(graph: nx.DiGraph, risks: dict[str, str], degree_limit: int = 12) -> set[str]:
+    """排除被大量调用的公共节点，例如 apiReturn、getEs。"""
+    hubs = set()
+    for node_id, attrs in graph.nodes(data=True):
+        node_key = str(node_id)
+        if node_key in risks:
+            continue
+        name = str(attrs.get("source_name") or "").strip().lower()
+        short = name.split(".")[-1]
+        if name in _UTILITY_NAMES or short in _UTILITY_NAMES or graph.degree(node_id) >= degree_limit:
+            hubs.add(node_key)
+    return hubs
+
+
+def expand_related_nodes(graph: nx.DiGraph, seeds: set[str], hops: int = 2, skip: set[str] | None = None) -> set[str]:
+    skip = skip or set()
     seen = set(seeds) & set(graph.nodes)
     frontier = set(seen)
     for _ in range(hops):
         nxt = set()
         for node_id in frontier:
+            if node_id in skip:
+                continue
             for neighbor in list(graph.predecessors(node_id)) + list(graph.successors(node_id)):
                 neighbor = str(neighbor)
-                if neighbor not in seen:
+                if neighbor not in seen and neighbor not in skip:
                     nxt.add(neighbor)
         seen |= nxt
         frontier = nxt
@@ -171,12 +194,19 @@ def expand_related_nodes(graph: nx.DiGraph, seeds: set[str], hops: int = 2) -> s
 def select_visualization_nodes(graph: nx.DiGraph, sections: list[dict]) -> tuple[set[str], dict[str, str], str, nx.DiGraph]:
     resolved = resolve_project_graph(graph)
     risks = match_vulnerability_nodes(graph, sections)
+    hubs = low_value_hubs(resolved, risks)
     if risks:
-        related = expand_related_nodes(resolved, set(risks), hops=2)
+        related = expand_related_nodes(resolved, set(risks), hops=2, skip=hubs)
+        related -= hubs
         if not related:
             related = set(risks)
-        return related, risks, "漏洞相关", resolved
-    return set(resolved.nodes), {}, "项目源码", resolved
+        cleaned = resolved.copy()
+        cleaned.remove_nodes_from([node for node in hubs if node in cleaned])
+        return related, risks, "漏洞相关", cleaned
+    kept = set(resolved.nodes) - hubs
+    cleaned = resolved.copy()
+    cleaned.remove_nodes_from([node for node in hubs if node in cleaned])
+    return kept, {}, "项目源码", cleaned
 
 
 def _file_color(name: str) -> str:
@@ -295,7 +325,7 @@ def build_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: d
                 "hidden": cluster_of.get(source_id, -1) != cluster_of.get(target_id, -2),
                 "rank": max(rank_by_id.get(source_id, 0), rank_by_id.get(target_id, 0)),
             })
-    graph_id = hashlib.sha1(("v15-pixel|" + str(Path(graph_path).resolve())).encode("utf-8")).hexdigest()[:16]
+    graph_id = hashlib.sha1(("v17-util|" + str(Path(graph_path).resolve())).encode("utf-8")).hexdigest()[:16]
     default_pct = 15 if len(nodes) > 300 else 30
     for node in nodes:
         if not node.get("color"):
@@ -609,7 +639,7 @@ def build_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: d
 
 def cached_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: dict[str, str] | None = None, resolved: nx.DiGraph | None = None) -> Path:
     source = Path(graph_path)
-    signature = hashlib.sha1(("v15-pixel|" + ",".join(sorted(keep_ids or []))).encode("utf-8")).hexdigest()[:10]
+    signature = hashlib.sha1(("v17-util|" + ",".join(sorted(keep_ids or []))).encode("utf-8")).hexdigest()[:10]
     html_path = source.parent / f"_graph_preview_focus_{signature}.html"
     if html_path.exists() and html_path.stat().st_mtime >= source.stat().st_mtime:
         return html_path
