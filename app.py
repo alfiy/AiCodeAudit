@@ -1019,7 +1019,7 @@ def _render_risk_table(all_rows: list[dict], selected: dict):
         })
 
     display_rows = [{
-        "序号": item["index"],
+        #"序号": item["index"],
         "扫描目标": item["name"],
         "漏洞类型": item["type"],
         "等级": item["level"],
@@ -1075,7 +1075,7 @@ def _render_risk_table(all_rows: list[dict], selected: dict):
         _render_pager(len(visible_rows), finding_page_size, "finding_page", widget_suffix="_bottom")
 
 
-def _handle_history_action(session_key: str, action: str):
+def _handle_history_action(session_key: str, action: str, tab_key: str = "result_active_tab", return_tab: str = "漏洞与风险"):
     click_key = f"history_{action}_click"
     click = st.session_state.get(click_key)
     items = st.session_state.get("_history_page_items") or []
@@ -1087,7 +1087,7 @@ def _handle_history_action(session_key: str, action: str):
     item = items[row]
     if action == "view":
         st.session_state[session_key] = item["label"]
-        st.session_state["result_active_tab"] = "漏洞与风险"
+        st.session_state[tab_key] = return_tab
         st.rerun()
     elif action == "delete":
         output_dir = Path(item["output_dir"])
@@ -1106,7 +1106,7 @@ def _handle_history_action(session_key: str, action: str):
         st.session_state["history_download_item"] = item
 
 
-def _render_history_table(results: list[dict], session_key: str):
+def _render_history_table(results: list[dict], session_key: str, tab_key: str = "result_active_tab", return_tab: str = "漏洞与风险"):
     page_size = 10
     page_key = "history_scan_page"
     st.markdown('<div class="filter-gap"></div>', unsafe_allow_html=True)
@@ -1182,7 +1182,7 @@ def _render_history_table(results: list[dict], session_key: str):
             "查看": st.column_config.ButtonColumn(
                 "查看",
                 on_click=_handle_history_action,
-                args=(session_key, "view"),
+                args=(session_key, "view", tab_key, return_tab),
                 key="history_view_click",
                 width=48,
                 alignment="center",
@@ -1190,7 +1190,7 @@ def _render_history_table(results: list[dict], session_key: str):
             "下载": st.column_config.ButtonColumn(
                 "下载",
                 on_click=_handle_history_action,
-                args=(session_key, "download"),
+                args=(session_key, "download", tab_key, return_tab),
                 key="history_download_click",
                 width=48,
                 alignment="center",
@@ -1198,7 +1198,7 @@ def _render_history_table(results: list[dict], session_key: str):
             "删除": st.column_config.ButtonColumn(
                 "删除",
                 on_click=_handle_history_action,
-                args=(session_key, "delete"),
+                args=(session_key, "delete", tab_key, return_tab),
                 key="history_delete_click",
                 width=48,
                 alignment="center",
@@ -1277,12 +1277,41 @@ def render_graph_page(workspace: Path):
         st.info("还没有可展示的图谱，请先在“分析”页面执行一次审计。")
         return
 
-    selected = _render_result_selector(results, session_key="selected_graph_label")
+    selected = _render_result_selector(results, session_key="selected_graph_label", show_cards=False)
     if not selected:
-        st.info("请从上方列表中选择一个分析结果。")
+        st.info("请选择一个分析结果。")
         return
 
-    st.divider()
+    st.session_state.setdefault("graph_active_tab", "当前图谱")
+    current_col, history_col = st.columns([1.6, 1.2])
+    with current_col:
+        if st.button(
+            "当前图谱",
+            key="tab_graph_current",
+            type="primary" if st.session_state["graph_active_tab"] == "当前图谱" else "secondary",
+            width="stretch",
+        ):
+            st.session_state["graph_active_tab"] = "当前图谱"
+            st.rerun()
+    with history_col:
+        if st.button(
+            "历史扫描",
+            key="tab_graph_history",
+            type="primary" if st.session_state["graph_active_tab"] == "历史扫描" else "secondary",
+            width="stretch",
+        ):
+            st.session_state["graph_active_tab"] = "历史扫描"
+            st.rerun()
+
+    if st.session_state["graph_active_tab"] == "历史扫描":
+        st.caption("默认展示最新一次扫描。点击「查看」可切换到该次依赖图谱。")
+        _render_history_table(
+            results,
+            session_key="selected_graph_label",
+            tab_key="graph_active_tab",
+            return_tab="当前图谱",
+        )
+        return
 
     if not os.path.exists(selected["graph_path"]):
         st.warning("当前结果没有可用的 graphml 文件。")
