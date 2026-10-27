@@ -18,7 +18,7 @@ from matplotlib import font_manager
 from audit.agent import refresh_llm_client
 from audit.service import run_audit
 from config import C
-from graph_atlas import cached_graph_html, cached_static_graph_html
+from graph_atlas import cached_graph_html, cached_static_graph_html, select_visualization_nodes
 import base64
 
 
@@ -528,18 +528,44 @@ def render_graph_fallback(graph: nx.DiGraph):
     st.pyplot(fig, clear_figure=True)
 
 
+def _short_path(path: str) -> str:
+    text = str(path or "").replace("\\", "/")
+    if not text:
+        return ""
+    parts = [part for part in text.split("/") if part]
+    if "extracted" in parts:
+        index = parts.index("extracted")
+        parts = parts[index + 2:] if len(parts) > index + 2 else parts[-3:]
+    if len(parts) > 4:
+        return ".../" + "/".join(parts[-3:])
+    return "/".join(parts)
+
+
+def _short_node_id(node_id: str) -> str:
+    text = str(node_id or "")
+    if "|" in text:
+        left, right = text.rsplit("|", 1)
+        return f"{Path(left).name}|{right}"
+    return Path(text).name or text
+
+
 def build_node_dataframe(graph: nx.DiGraph):
     rows = []
     for node_id, attrs in graph.nodes(data=True):
+        start = attrs.get("start_code_line", "")
+        end = attrs.get("end_code_line", "")
+        line_range = f"{start}-{end}" if start or end else ""
         rows.append({
-            "节点ID": str(node_id),
             "文件": attrs.get("name", ""),
-            "路径": attrs.get("path", ""),
             "代码单元": attrs.get("source_name", ""),
+            "有源码": "有" if attrs.get("source_code") else "无",
+            "行号": line_range,
             "被调用目标": attrs.get("target_name", ""),
-            "开始行": attrs.get("start_code_line", ""),
-            "结束行": attrs.get("end_code_line", ""),
             "摘要": attrs.get("desc", ""),
+            "节点ID": _short_node_id(node_id),
+            "路径": _short_path(attrs.get("path", "")),
+            "_节点ID全文": str(node_id),
+            "_路径全文": str(attrs.get("path", "")),
         })
     return pd.DataFrame(rows)
 
@@ -1180,7 +1206,7 @@ def render_result_list_page(workspace: Path):
 def render_graph_page(workspace: Path):
     render_page_hero(
         "依赖图谱可视化",
-        "从交互图谱、静态预览和节点明细三个视角查看项目依赖结构，快速定位高耦合节点与关键调用单元。",
+        "从漏洞相关节点看依赖关系。没有漏洞时，只展示项目源码节点，排除第三方和框架节点。",
         "Dependency Atlas",
     )
     results = get_selected_result(workspace)
@@ -1229,10 +1255,14 @@ def render_graph_page(workspace: Path):
         return
 
     graph = nx.read_graphml(selected["graph_path"])
+    sections = parse_report(read_text_file(selected["report_path"])) if selected.get("report_path") else []
+    keep_ids, risks, mode, resolved = select_visualization_nodes(graph, sections)
+    view_graph = resolved.subgraph([node for node in resolved.nodes if str(node) in keep_ids]).copy()
     render_stat_strip([
-        ("节点数", str(graph.number_of_nodes())),
-        ("边数", str(graph.number_of_edges())),
-        ("结果目录", Path(selected["output_dir"]).name),
+        ("展示模式", mode),
+        ("展示节点", str(view_graph.number_of_nodes())),
+        ("漏洞节点", str(len(risks))),
+        ("展示边", str(view_graph.number_of_edges())),
     ])
     view = st.radio(
         "图谱视图",
@@ -1242,24 +1272,36 @@ def render_graph_page(workspace: Path):
         key="graph_view",
     )
     if view == "交互图谱":
-        st.caption("首次打开会计算一次力导向布局并缓存。点击节点可在当前窗口查看它的直接相连节点，可拖动，返回全局后恢复。")
-        html_path = cached_graph_html(selected["graph_path"])
+        st.caption("节点大小和名称字号固定，不随缩放变化。名称只在鼠标悬停时显示，避免互相遮盖。")
+        html_path = cached_graph_html(selected["graph_path"], keep_ids, risks, resolved)
         st.iframe(html_path, height=820)
     elif view == "静态预览":
-        st.caption("静态预览只显示前 120 个高优先级节点。可滚轮缩放，点击节点查看直接相连，返回全局后恢复。")
-        html_path = cached_static_graph_html(selected["graph_path"])
+        st.caption("静态预览使用同一批节点。红色/橙色是漏洞节点，其余是相关源码节点。")
+        html_path = cached_static_graph_html(selected["graph_path"], keep_ids, risks, resolved)
         st.iframe(html_path, height=820)
     elif view == "节点列表":
-        node_df = build_node_dataframe(graph)
-        search_text = st.text_input("搜索节点 / 文件 / 路径", key="node_search").strip().lower()
+        st.caption("这里只显示当前图谱范围内的节点。节点ID是「文件名|代码单元」，路径已简写。")
+        node_df = build_node_dataframe(view_graph)
+        search_text = st.text_input("搜索文件 / 代码单元 / 被调用目标 / 路径", key="node_search").strip().lower()
         if search_text:
             node_df = node_df[
                 node_df.astype(str).apply(lambda col: col.str.lower().str.contains(search_text, na=False))
                 .any(axis=1)
             ]
-        st.dataframe(node_df, width="stretch", height=520)
+        display_df = node_df.drop(columns=["_节点ID全文", "_路径全文"], errors="ignore")
+        st.dataframe(
+            display_df,
+            width="stretch",
+            height=520,
+            column_config={
+                "有源码": st.column_config.TextColumn(width="small"),
+                "行号": st.column_config.TextColumn(width="small"),
+                "节点ID": st.column_config.TextColumn(width="medium", help="简写为 文件名|代码单元"),
+                "路径": st.column_config.TextColumn(width="medium", help="已去掉输出目录前缀"),
+            },
+        )
     else:
-        st.dataframe(build_edge_dataframe(graph), width="stretch", height=520)
+        st.dataframe(build_edge_dataframe(view_graph), width="stretch", height=520)
 
 
 def _cfg_int(name: str, default: int) -> int:
