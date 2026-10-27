@@ -1238,7 +1238,7 @@ def render_graph_page(workspace: Path):
         key="graph_view",
     )
     if view == "交互图谱":
-        st.caption("首次打开会计算一次力导向布局并缓存。之后拖动滑杆只切换显示，不会重算。默认 30%，拉到 100% 显示全部。")
+        st.caption("首次打开会计算一次力导向布局并缓存。点击节点可在当前窗口查看它的直接相连节点，可拖动，返回全局后恢复。")
         html_path = cached_graph_html(selected["graph_path"])
         st.iframe(html_path, height=820)
     elif view == "静态预览":

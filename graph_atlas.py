@@ -1,4 +1,4 @@
-"""交互依赖图谱：首次力导向布局，之后缓存坐标，滑杆只切换显示。"""
+"""交互依赖图谱：全局布局缓存，点击节点进入直接相连的局部视图。"""
 import hashlib
 import json
 from pathlib import Path
@@ -56,6 +56,7 @@ def build_graph_html(graph_path: str) -> str:
       <label for="draw-range" style="white-space:nowrap;">绘制范围</label>
       <input id="draw-range" type="range" min="10" max="100" step="5" value="30" style="flex:1;">
       <strong id="draw-pct" style="min-width:48px;">30%</strong>
+      <button id="back-global" type="button" style="display:none;border:1px solid #d0d5dd;background:#fff;border-radius:8px;padding:4px 10px;cursor:pointer;">返回全局</button>
       <span id="graph-status">图谱加载中...</span>
     </div>
     <div id="graph" style="width:100%;height:740px;border-radius:18px;border:1px solid #e6e8ef;background:linear-gradient(180deg,#fbfbfd 0%,#f4f6fb 100%);"></div>
@@ -67,12 +68,22 @@ def build_graph_html(graph_path: str) -> str:
       const status = document.getElementById("graph-status");
       const slider = document.getElementById("draw-range");
       const pctLabel = document.getElementById("draw-pct");
+      const backBtn = document.getElementById("back-global");
       const total = DATA.nodes.length;
+      const nodeById = Object.fromEntries(DATA.nodes.map((node) => [node.id, node]));
+      const neighbors = {{}};
+      DATA.edges.forEach((edge) => {{
+        (neighbors[edge.from] ||= []).push(edge.to);
+        (neighbors[edge.to] ||= []).push(edge.from);
+      }});
       let network = null;
       let nodesDS = null;
       let edgesDS = null;
       let shown = 0;
       let started = false;
+      let ready = false;
+      let focusId = null;
+      let globalPos = null;
       let saved = null;
       try {{ saved = JSON.parse(localStorage.getItem("aica-graph-pos:" + GRAPH_ID) || "null"); }} catch (e) {{}}
 
@@ -103,7 +114,96 @@ def build_graph_html(graph_path: str) -> str:
         if (nodeUpdates.length) nodesDS.update(nodeUpdates);
         if (edgeUpdates.length) edgesDS.update(edgeUpdates);
         shown = limit;
-        status.innerText = statusText(percent, limit, saved ? "已使用缓存布局，拖动只切换显示。" : "布局已缓存，拖动只切换显示。");
+        if (!focusId) status.innerText = statusText(percent, limit, saved ? "已使用缓存布局。点击节点可查看直接相连。" : "布局已缓存。点击节点可查看直接相连。");
+      }};
+
+      const focusNode = (nodeId) => {{
+        if (!ready || !nodesDS) return;
+        const related = [...new Set(neighbors[nodeId] || [])];
+        const keep = new Set([nodeId, ...related]);
+        focusId = nodeId;
+        if (!globalPos) {{
+          globalPos = {{}};
+          nodesDS.get().forEach((node) => {{ globalPos[node.id] = [node.x, node.y]; }});
+        }}
+        const radius = Math.max(220, 70 + related.length * 16);
+        const nodeUpdates = DATA.nodes.map((node) => {{
+          if (node.id === nodeId) {{
+            return {{
+              id: node.id,
+              label: node.label,
+              hidden: false,
+              x: 0,
+              y: 0,
+              fixed: false,
+              size: 24,
+              font: {{ size: 16, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 3, strokeColor: "#ffffff", vadjust: 8 }},
+            }};
+          }}
+          if (!keep.has(node.id)) return {{ id: node.id, hidden: true }};
+          const index = related.indexOf(node.id);
+          const angle = (Math.PI * 2 * index) / Math.max(related.length, 1);
+          return {{
+            id: node.id,
+            label: node.label,
+            hidden: false,
+            x: Math.round(Math.cos(angle) * radius),
+            y: Math.round(Math.sin(angle) * radius),
+            fixed: false,
+            font: {{ size: 14, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 3, strokeColor: "#ffffff", vadjust: 6 }},
+          }};
+        }});
+        nodesDS.update(nodeUpdates);
+        edgesDS.update(DATA.edges.map((edge) => ({{
+          id: edge.id,
+          hidden: !(keep.has(edge.from) && keep.has(edge.to)),
+          smooth: false,
+        }})));
+        nodeUpdates.forEach((node) => {{
+          if (!node.hidden && node.x !== undefined) network.moveNode(node.id, node.x, node.y);
+        }});
+        network.setOptions({{
+          physics: {{ enabled: false }},
+          nodes: {{ scaling: {{ label: {{ enabled: false }} }} }},
+          edges: {{ smooth: false }},
+        }});
+        backBtn.style.display = "inline-block";
+        slider.disabled = true;
+        network.fit({{ animation: {{ duration: 250 }} }});
+        const label = nodeById[nodeId] ? nodeById[nodeId].label : nodeId;
+        status.innerText = "局部视图：" + label + "，直接相连 " + related.length + " 个。可拖动，本次不保存。";
+      }};
+
+      const restoreGlobal = () => {{
+        if (!nodesDS) return;
+        focusId = null;
+        const limit = Math.min(total, limitFor(Number(slider.value)));
+        nodesDS.update(DATA.nodes.map((node) => {{
+          const pos = (globalPos && globalPos[node.id]) || (saved && saved[node.id]);
+          const item = {{
+            id: node.id,
+            hidden: node.rank >= limit,
+            fixed: {{ x: true, y: true }},
+            size: node.size,
+            font: {{ size: 13, color: "#1f2a44" }},
+          }};
+          if (pos) {{
+            item.x = pos[0];
+            item.y = pos[1];
+          }}
+          return item;
+        }}));
+        edgesDS.update(DATA.edges.map((edge) => ({{ id: edge.id, hidden: edge.rank >= limit, smooth: {{ type: "dynamic" }} }})));
+        shown = limit;
+        globalPos = null;
+        network.setOptions({{
+          nodes: {{ scaling: {{ label: {{ enabled: true, min: 10, max: 16 }} }} }},
+          edges: {{ smooth: {{ type: "dynamic" }} }},
+        }});
+        backBtn.style.display = "none";
+        slider.disabled = false;
+        network.fit({{ animation: false }});
+        status.innerText = statusText(Number(slider.value), limit, "已返回全局。点击节点可查看直接相连。");
       }};
 
       const freeze = () => {{
@@ -162,17 +262,25 @@ def build_graph_html(graph_path: str) -> str:
         }});
         if (saved) {{
           network.fit({{ animation: false }});
-          status.innerText = statusText(30, shown, "已使用缓存布局，拖动只切换显示。");
+          ready = true;
+          status.innerText = statusText(30, shown, "已使用缓存布局。点击节点可查看直接相连。");
         }} else {{
           status.innerText = "首次计算布局，完成后会缓存。这一次会稍慢。";
           network.once("stabilizationIterationsDone", () => {{
             freeze();
             applyRange(30);
+            ready = true;
             network.fit({{ animation: false }});
-            status.innerText = statusText(30, shown, "布局已缓存，之后拖动只切换显示。");
+            status.innerText = statusText(30, shown, "布局已缓存。点击节点可查看直接相连。");
           }});
         }}
+        network.on("click", (params) => {{
+          if (!ready || !params.nodes.length) return;
+          focusNode(params.nodes[0]);
+        }});
+        backBtn.addEventListener("click", restoreGlobal);
         slider.addEventListener("input", () => {{
+          if (focusId) return;
           pctLabel.textContent = slider.value + "%";
           applyRange(Number(slider.value));
         }});
@@ -185,7 +293,7 @@ def build_graph_html(graph_path: str) -> str:
 
 def cached_graph_html(graph_path: str) -> Path:
     source = Path(graph_path)
-    html_path = source.parent / "_graph_preview_atlas.html"
+    html_path = source.parent / "_graph_preview_focus_v2.html"
     if html_path.exists() and html_path.stat().st_mtime >= source.stat().st_mtime:
         return html_path
     html_path.write_text(build_graph_html(graph_path), encoding="utf-8")
