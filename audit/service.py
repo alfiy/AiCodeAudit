@@ -854,6 +854,7 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
 
     batches = [payloads[i:i + batch_size] for i in range(0, len(payloads), batch_size)]
     reports = []
+    passed_reports = []
     failed_count = 0
     filtered_pass_count = 0
     total_tasks = len(payloads)
@@ -872,13 +873,16 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
             normalized = normalize_report_text(result)
             if is_pass_only_report(normalized):
                 filtered_pass_count += 1
+                passed_reports.append(normalized)
                 continue
             reports.append(normalized)
         reports = _dedupe_reports(reports)
+        passed_reports = _dedupe_reports(passed_reports)
+        combined = reports + passed_reports
         write_file(
             out_file,
-            "\n--------------------------------\n".join(reports)
-            if reports
+            "\n--------------------------------\n".join(combined)
+            if combined
             else "<审计报告>\n<结论>审计通过</结论>\n</审计报告>",
         )
 
@@ -888,9 +892,10 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
     if is_incomplete:
         incomplete_report = _build_incomplete_audit_report(total_tasks, failed_count, failure_rate_threshold)
         final_report = incomplete_report
-        if reports:
+        if reports or passed_reports:
             reports = _dedupe_reports(reports)
-            final_report += "\n--------------------------------\n" + "\n--------------------------------\n".join(reports)
+            passed_reports = _dedupe_reports(passed_reports)
+            final_report += "\n--------------------------------\n" + "\n--------------------------------\n".join(reports + passed_reports)
         write_file(out_file, final_report)
         logger.warning(
             "Agent_2 失败率过高，结果已标记为审计不完整: total_tasks={} failed_tasks={} failure_rate={:.2%} threshold={:.2%}",

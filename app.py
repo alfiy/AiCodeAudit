@@ -1100,14 +1100,16 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
         hash_text = (item.get("project_hash") or "")[:12]
         if needle and needle not in f"{name} {time_text} {hash_text}".lower():
             continue
-        if selected_levels != ["高危", "中危", "低危", "信息"] or show_passed:
-            rows = _load_result_rows(item)
-            levels = {row["level"] for row in rows if not row["pass"]}
-            if selected_levels and not levels.intersection(selected_levels):
-                continue
-            if show_passed and not any(row["pass"] for row in rows):
-                continue
-        filtered.append(item)
+        rows = _load_result_rows(item)
+        risk_count = sum(1 for row in rows if not row["pass"])
+        pass_count = sum(1 for row in rows if row["pass"])
+        risk_levels = {row["level"] for row in rows if not row["pass"]}
+        has_selected_risk = bool(risk_levels.intersection(selected_levels))
+        if risk_count and not has_selected_risk:
+            continue
+        if not risk_count and not show_passed:
+            continue
+        filtered.append((item, risk_count, pass_count))
 
     filter_sig = f"{needle}|{tuple(selected_levels)}|{show_passed}|{len(filtered)}"
     if st.session_state.get("history_filter_sig") != filter_sig:
@@ -1125,14 +1127,17 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
         st.session_state[page_key] = current
     start = (current - 1) * page_size
     page_results = filtered[start:start + page_size]
-    st.session_state["_history_page_items"] = page_results
+    st.session_state["_history_page_items"] = [item for item, _, _ in page_results]
+    if show_passed and not any(pass_count for _, _, pass_count in filtered):
+        st.caption("已打开“显示通过”。当前历史报告里没有保存审计通过记录，所以列表没有新增条目。重新审计后才会出现。")
 
     rows = []
-    for item in page_results:
+    for item, risk_count, pass_count in page_results:
         report_path = item.get("report_path") or ""
         rows.append({
             "扫描目标": Path(item["output_dir"]).name,
             "时间": item["label"].split("|")[-1].strip(),
+            "结果": f"风险 {risk_count} / 通过 {pass_count}",
             "哈希": (item.get("project_hash") or "")[:12],
             "查看": ":material/visibility:",
             "下载": ":material/download:" if report_path and os.path.exists(report_path) else "",
@@ -1142,11 +1147,12 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
         pd.DataFrame(rows),
         width="stretch",
         hide_index=True,
-        column_order=["扫描目标", "时间", "哈希", "查看", "下载", "删除"],
+        column_order=["扫描目标", "时间", "结果", "哈希", "查看", "下载", "删除"],
         column_config={
-            "扫描目标": st.column_config.TextColumn("扫描目标", width=720),
-            "时间": st.column_config.TextColumn("时间", width=220),
-            "哈希": st.column_config.TextColumn("哈希", width=160),
+            "扫描目标": st.column_config.TextColumn("扫描目标", width=520),
+            "时间": st.column_config.TextColumn("时间", width=180),
+            "结果": st.column_config.TextColumn("结果", width=160),
+            "哈希": st.column_config.TextColumn("哈希", width=140),
             "查看": st.column_config.ButtonColumn(
                 "查看",
                 on_click=_handle_history_action,
