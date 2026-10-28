@@ -580,6 +580,25 @@ def build_edge_dataframe(graph: nx.DiGraph):
     return pd.DataFrame(rows)
 
 
+def _goto_audit_result() -> None:
+    st.session_state["pending_nav_page"] = "结果可视化"
+
+
+def _render_audit_notice() -> None:
+    notice = st.session_state.get("audit_notice")
+    if not notice:
+        return
+    mode = notice.get("mode", "全量审计")
+    changed = notice.get("changed", 0)
+    if mode == "未变更，复用上次结果":
+        st.warning("源码无更新，已复用上次审计结果，无需重新分析。")
+    elif mode == "增量审计":
+        st.success(f"增量分析完成，本次重点审计了 {changed} 个变更文件。")
+    else:
+        st.success("首次分析完成，已生成审计结果。")
+    st.button("查看审计结果", type="primary", key="goto_audit_result", on_click=_goto_audit_result)
+
+
 def render_analysis_page(workspace: Path):
     subdirs = ensure_streamlit_subdirs(workspace)
     render_page_hero(
@@ -604,6 +623,7 @@ def render_analysis_page(workspace: Path):
     st.session_state.enable_thinking = enable_thinking
     if uploaded_file is None:
         st.info("请上传一个 zip 压缩包。")
+        _render_audit_notice()
         return
 
     analyzing = st.session_state.get("analyzing", False)
@@ -622,6 +642,8 @@ def render_analysis_page(workspace: Path):
                 st.write("保存上传文件")
                 run_root, project_dir = extract_zip(zip_path, subdirs["extracted"])
                 st.write(f"解压完成: `{project_dir}`")
+                project_key = sanitize_name(Path(uploaded_file.name).stem)
+                st.write(f"项目标识: `{project_key}`，将按文件 MD5 判断是否增量审计")
 
                 batch_name = f"{sanitize_name(project_dir.name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 output_dir = subdirs["results"] / batch_name
@@ -631,12 +653,19 @@ def render_analysis_page(workspace: Path):
                     str(output_dir),
                     batch_size=st.session_state.batch_size,
                     enable_thinking=bool(st.session_state.get("enable_thinking", False)),
+                    project_key=project_key,
                 )
                 st.session_state.latest_result = result
+                st.session_state.audit_notice = {
+                    "mode": result.get("mode", "全量审计"),
+                    "changed": result.get("changed_files", 0),
+                }
                 status.update(label="分析完成", state="complete")
 
-            st.success("分析完成，请从侧边栏进入“结果可视化”或“依赖可视化”查看。")
+            mode = result.get("mode", "全量审计")
+            changed = result.get("changed_files", 0)
             st.session_state.analysis_done = True
+            st.session_state.audit_notice = {"mode": mode, "changed": changed}
         except zipfile.BadZipFile:
             st.error("上传文件不是有效的 zip 压缩包。")
         except Exception as exc:
@@ -651,6 +680,8 @@ def render_analysis_page(workspace: Path):
                 if "output_dir" in locals() and output_dir.exists():
                     shutil.rmtree(output_dir, ignore_errors=True)
             st.rerun()
+
+    _render_audit_notice()
 
 
 def get_selected_result(workspace: Path):
@@ -1272,7 +1303,7 @@ def render_graph_page(workspace: Path):
         key="graph_view",
     )
     if view == "交互图谱":
-        st.caption("只展示漏洞相关节点。被大量调用的公共节点已排除，悬停显示关联，点击查看依赖。")
+        st.caption("已排除 apiReturn、getEs 这类被大量调用的公共节点。悬停显示关联，点击查看依赖。")
         html_path = cached_graph_html(selected["graph_path"], keep_ids, risks, resolved)
         st.iframe(html_path, height=820)
     elif view == "静态预览":
@@ -1519,6 +1550,8 @@ def main():
     workspace = ensure_workspace()
     init_session_state()
     inject_global_styles()
+    if st.session_state.get("pending_nav_page"):
+        st.session_state["nav_page"] = st.session_state.pop("pending_nav_page")
 
     with st.sidebar:
         st.markdown("## AI Code Audit")
@@ -1532,6 +1565,7 @@ def main():
         page = st.radio(
             "功能导航",
             ["分析", "结果可视化", "依赖可视化", "配置"],
+            key="nav_page",
             label_visibility="collapsed",
         )
 

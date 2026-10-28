@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import re
 from collections import deque
@@ -371,6 +372,120 @@ def calculate_project_hash(root_dir) -> str:
         for sub_dir in sorted(current.source_dirs, key=lambda item: item.path):
             queue.append(sub_dir)
     return hash_object.hexdigest()
+
+
+def _baseline_dir(project_key: str) -> str:
+    safe = re.sub(r"[^\w.-]+", "_", project_key or "project").strip("._") or "project"
+    path = os.path.join("output", "streamlit_runs", "baselines", safe)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _relative_path(path: str, root: str) -> str:
+    try:
+        return os.path.relpath(path, root).replace("\\", "/")
+    except Exception:
+        return str(path or "").replace("\\", "/")
+
+
+def _file_md5_map(root_dir) -> dict[str, str]:
+    hashes = {}
+    queue = deque([root_dir])
+    while queue:
+        current = queue.popleft()
+        for file in current.source_files:
+            rel = _relative_path(file.path, root_dir.path)
+            hashes[rel] = hashlib.md5(file.source_code.encode("utf-8", errors="ignore")).hexdigest()
+        queue.extend(current.source_dirs)
+    return hashes
+
+
+def _load_baseline(project_key: str) -> dict | None:
+    base = _baseline_dir(project_key)
+    manifest_path = os.path.join(base, "manifest.json")
+    graph_path = os.path.join(base, "graph.graphml")
+    report_path = os.path.join(base, "report.log")
+    if not (os.path.exists(manifest_path) and os.path.exists(graph_path)):
+        return None
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    manifest["graph_path"] = graph_path
+    manifest["report_path"] = report_path if os.path.exists(report_path) else ""
+    return manifest
+
+
+def _save_baseline(project_key: str, project_root: str, hashes: dict[str, str], graph_path: str, report_path: str) -> None:
+    base = _baseline_dir(project_key)
+    target_graph = os.path.join(base, "graph.graphml")
+    target_report = os.path.join(base, "report.log")
+    if os.path.abspath(graph_path) != os.path.abspath(target_graph):
+        with open(graph_path, "rb") as src, open(target_graph, "wb") as dst:
+            dst.write(src.read())
+    if report_path and os.path.exists(report_path) and os.path.abspath(report_path) != os.path.abspath(target_report):
+        with open(report_path, "r", encoding="utf-8") as src, open(target_report, "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+    with open(os.path.join(base, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump({"project_root": project_root, "files": hashes}, handle, ensure_ascii=False, indent=2)
+
+
+def _diff_files(old_files: dict[str, str], new_files: dict[str, str]) -> tuple[set[str], set[str], set[str]]:
+    old_keys = set(old_files)
+    new_keys = set(new_files)
+    added = new_keys - old_keys
+    deleted = old_keys - new_keys
+    modified = {key for key in old_keys & new_keys if old_files[key] != new_files[key]}
+    return added, modified, deleted
+
+
+def _drop_nodes_for_files(graph: nx.DiGraph, root: str, changed: set[str]) -> nx.DiGraph:
+    if not changed:
+        return graph
+    drop = [
+        node
+        for node, attrs in graph.nodes(data=True)
+        if _relative_path(str(attrs.get("path") or ""), root) in changed
+    ]
+    graph.remove_nodes_from(drop)
+    return graph
+
+
+def _focus_graph(graph: nx.DiGraph, project_root: str, changed: set[str]) -> nx.DiGraph:
+    seeds = [
+        node
+        for node, attrs in graph.nodes(data=True)
+        if _relative_path(str(attrs.get("path") or ""), project_root) in changed
+    ]
+    if not seeds:
+        return graph
+    keep = set(seeds)
+    for node in seeds:
+        keep.update(graph.predecessors(node))
+        keep.update(graph.successors(node))
+    return graph.subgraph(keep).copy()
+
+
+def _merge_reports(old_text: str, new_text: str, old_root: str, new_root: str, changed: set[str]) -> str:
+    def sections(text: str) -> list[str]:
+        return [item.strip() for item in (text or "").split("--------------------------------") if item.strip()]
+
+    def section_rel(section: str, root: str) -> str:
+        match = re.search(r"路径:\s*([^\n]+)", section)
+        if not match:
+            return ""
+        return _relative_path(match.group(1).strip(), root)
+
+    kept = [
+        section for section in sections(old_text)
+        if section_rel(section, old_root) not in changed
+    ]
+    fresh = [
+        section for section in sections(new_text)
+        if "<结论>审计通过</结论>" not in section or "<漏洞>" in section
+    ]
+    merged = _dedupe_reports(kept + fresh)
+    if not merged:
+        return "<审计报告>\n<结论>审计通过</结论>\n</审计报告>"
+    return "\n--------------------------------\n".join(merged)
 
 
 async def async_run_agent_1(source_file_list: List[SourceFile], out_file, batch_size=10):
@@ -797,7 +912,7 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
     )
 
 
-def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_thinking: bool = False):
+def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_thinking: bool = False, project_key: str = ""):
     from audit.agent import set_thinking_enabled
     set_thinking_enabled(False)
     logger.info("本次审计思考模式: {}", "开启" if enable_thinking else "关闭")
@@ -806,13 +921,52 @@ def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_th
 
     root_dir = scan_project_struct(project_dir)
     project_hash = calculate_project_hash(root_dir)
-    logger.info("扫描完成，项目内容哈希: {}", project_hash)
+    file_hashes = _file_md5_map(root_dir)
+    baseline = _load_baseline(project_key) if project_key else None
+    added, modified, deleted = _diff_files(baseline.get("files", {}) if baseline else {}, file_hashes)
+    changed = added | modified | deleted
+    logger.info("扫描完成，项目内容哈希: {}，变更文件: {}", project_hash, len(changed))
     logger.debug("解析目录结构如下\n{}", print_source_dir(root_dir))
 
     graph_path = os.path.join(output_dir, f"{project_hash}.graphml")
     report_path = os.path.join(output_dir, f"{project_hash}_审计结果.log")
+    incremental = bool(baseline and changed and len(changed) < max(1, int(len(file_hashes) * 0.6)))
 
-    if not os.path.exists(graph_path):
+    if baseline and not changed:
+        logger.info("文件哈希无变化，复用上次审计结果")
+        with open(baseline["graph_path"], "rb") as src, open(graph_path, "wb") as dst:
+            dst.write(src.read())
+        if baseline.get("report_path"):
+            with open(baseline["report_path"], "r", encoding="utf-8") as src, open(report_path, "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+        return {
+            "project_hash": project_hash,
+            "graph_path": graph_path,
+            "report_path": report_path,
+            "output_dir": output_dir,
+            "incremental": True,
+            "changed_files": 0,
+            "mode": "未变更，复用上次结果",
+        }
+
+    if incremental:
+        logger.info("增量审计：新增 {}，修改 {}，删除 {}", len(added), len(modified), len(deleted))
+        source_file_list = [
+            item for item in get_all_source_files_bfs(root_dir, chunk_token_size=_resolve_agent_1_chunk_token_size())
+            if _relative_path(item.path, project_dir) in (added | modified)
+        ]
+        partial_graph_path = os.path.join(output_dir, f"{project_hash}.partial.graphml")
+        if source_file_list:
+            logger.info("调用异步处理 Agent_1，仅处理变更文件: {}", len(source_file_list))
+            asyncio.run(async_run_agent_1(source_file_list, out_file=partial_graph_path, batch_size=batch_size))
+            partial = nx.read_graphml(partial_graph_path)
+        else:
+            partial = nx.DiGraph()
+        graph = nx.read_graphml(baseline["graph_path"])
+        graph = _drop_nodes_for_files(graph, baseline.get("project_root") or project_dir, modified | deleted)
+        graph = nx.compose(graph, partial)
+        nx.write_graphml(graph, graph_path)
+    elif not os.path.exists(graph_path):
         source_file_list = get_all_source_files_bfs(root_dir, chunk_token_size=_resolve_agent_1_chunk_token_size())
         logger.info("调用异步处理 Agent_1...")
         asyncio.run(async_run_agent_1(source_file_list, out_file=graph_path, batch_size=batch_size))
@@ -822,12 +976,32 @@ def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_th
     logger.info("调用异步处理 Agent_2...")
     set_thinking_enabled(enable_thinking)
     graph = nx.read_graphml(graph_path)
-    asyncio.run(async_run_agent_2(graph, out_file=report_path, batch_size=batch_size))
+    if incremental:
+        focus = _focus_graph(graph, project_dir, added | modified)
+        partial_report = os.path.join(output_dir, f"{project_hash}.partial.log")
+        asyncio.run(async_run_agent_2(focus, out_file=partial_report, batch_size=batch_size))
+        old_text = ""
+        if baseline.get("report_path") and os.path.exists(baseline["report_path"]):
+            with open(baseline["report_path"], "r", encoding="utf-8") as handle:
+                old_text = handle.read()
+        new_text = ""
+        if os.path.exists(partial_report):
+            with open(partial_report, "r", encoding="utf-8") as handle:
+                new_text = handle.read()
+        write_file(report_path, _merge_reports(old_text, new_text, baseline.get("project_root") or project_dir, project_dir, modified | deleted | added))
+    else:
+        asyncio.run(async_run_agent_2(graph, out_file=report_path, batch_size=batch_size))
     logger.success("输出成功，请在目录:{}查看", output_dir)
+    if project_key:
+        _save_baseline(project_key, project_dir, file_hashes, graph_path, report_path)
 
     return {
         "project_hash": project_hash,
         "graph_path": graph_path,
         "report_path": report_path,
         "output_dir": output_dir,
+        "incremental": incremental,
+        "changed_files": len(changed),
+        "mode": "增量审计" if incremental else "全量审计",
     }
+
