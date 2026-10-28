@@ -1047,6 +1047,24 @@ def _render_risk_table(all_rows: list[dict], selected: dict):
         _render_pager(len(visible_rows), finding_page_size, "finding_page", widget_suffix="_bottom")
 
 
+def _delete_history_item(item: dict, session_key: str) -> None:
+    output_dir = Path(item["output_dir"])
+    project_key = ""
+    meta_path = output_dir / "meta.json"
+    if meta_path.exists():
+        project_key = json.loads(meta_path.read_text(encoding="utf-8")).get("project_key", "")
+    delete_project_baseline(project_key, item.get("graph_path") or "")
+    if output_dir.exists():
+        shutil.rmtree(output_dir, ignore_errors=True)
+    latest = st.session_state.get("latest_result")
+    if latest and latest.get("output_dir") == str(output_dir):
+        st.session_state.latest_result = None
+        st.session_state.audit_notice = None
+        st.session_state.analysis_done = False
+    if st.session_state.get(session_key) == item["label"]:
+        st.session_state[session_key] = None
+
+
 def _handle_history_action(session_key: str, action: str, tab_key: str = "result_active_tab", return_tab: str = "漏洞与风险"):
     click_key = f"history_{action}_click"
     click = st.session_state.get(click_key)
@@ -1062,22 +1080,8 @@ def _handle_history_action(session_key: str, action: str, tab_key: str = "result
         st.session_state[tab_key] = return_tab
         st.rerun()
     elif action == "delete":
-        output_dir = Path(item["output_dir"])
         try:
-            project_key = ""
-            meta_path = output_dir / "meta.json"
-            if meta_path.exists():
-                project_key = json.loads(meta_path.read_text(encoding="utf-8")).get("project_key", "")
-            delete_project_baseline(project_key, item.get("graph_path") or "")
-            if output_dir.exists():
-                shutil.rmtree(output_dir, ignore_errors=True)
-            latest = st.session_state.get("latest_result")
-            if latest and latest.get("output_dir") == str(output_dir):
-                st.session_state.latest_result = None
-                st.session_state.audit_notice = None
-                st.session_state.analysis_done = False
-            if st.session_state.get(session_key) == item["label"]:
-                st.session_state[session_key] = None
+            _delete_history_item(item, session_key)
             st.rerun()
         except Exception as e:
             st.session_state["history_action_error"] = f"删除失败：{e}"
@@ -1139,6 +1143,34 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
     start = (current - 1) * page_size
     page_results = filtered[start:start + page_size]
     st.session_state["_history_page_items"] = [item for item, _, _ in page_results]
+    selected_dirs = set(st.session_state.get("history_selected_dirs") or [])
+    page_dirs = [item["output_dir"] for item, _, _ in page_results]
+    action_cols = st.columns([1.1, 1.1, 1.1, 1.2])
+    with action_cols[0]:
+        if st.button("全选当前页", key="history_select_page", width="stretch"):
+            selected_dirs.update(page_dirs)
+            st.session_state["history_selected_dirs"] = list(selected_dirs)
+            st.rerun()
+    with action_cols[1]:
+        if st.button("取消选择", key="history_clear_selection", width="stretch"):
+            st.session_state["history_selected_dirs"] = []
+            st.rerun()
+    with action_cols[2]:
+        if st.button("删除选中", key="history_delete_selected", width="stretch"):
+            chosen = [item for item, _, _ in page_results if item["output_dir"] in selected_dirs]
+            if not chosen:
+                st.session_state["history_action_error"] = "请先勾选要删除的扫描结果。"
+            else:
+                for item in chosen:
+                    _delete_history_item(item, session_key)
+                st.session_state["history_selected_dirs"] = [item for item in selected_dirs if item not in {row["output_dir"] for row in chosen}]
+            st.rerun()
+    with action_cols[3]:
+        if st.button("全部删除", key="history_delete_all", width="stretch"):
+            for item, _, _ in filtered:
+                _delete_history_item(item, session_key)
+            st.session_state["history_selected_dirs"] = []
+            st.rerun()
     if show_passed and not any(pass_count for _, _, pass_count in filtered):
         st.caption("已打开“显示通过”。当前历史报告里没有保存审计通过记录，所以列表没有新增条目。重新审计后才会出现。")
 
@@ -1146,6 +1178,7 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
     for item, risk_count, pass_count in page_results:
         report_path = item.get("report_path") or ""
         rows.append({
+            "选择": item["output_dir"] in selected_dirs,
             "扫描目标": Path(item["output_dir"]).name,
             "时间": item["label"].split("|")[-1].strip(),
             "结果": f"风险 {risk_count} / 通过 {pass_count}",
@@ -1154,16 +1187,18 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
             "下载": ":material/download:" if report_path and os.path.exists(report_path) else "",
             "删除": ":material/delete:",
         })
-    st.dataframe(
+    edited = st.data_editor(
         pd.DataFrame(rows),
         width="stretch",
         hide_index=True,
-        column_order=["扫描目标", "时间", "结果", "哈希", "查看", "下载", "删除"],
+        column_order=["选择", "扫描目标", "时间", "结果", "哈希", "查看", "下载", "删除"],
+        disabled=["扫描目标", "时间", "结果", "哈希"],
         column_config={
-            "扫描目标": st.column_config.TextColumn("扫描目标", width=520),
-            "时间": st.column_config.TextColumn("时间", width=180),
-            "结果": st.column_config.TextColumn("结果", width=160),
-            "哈希": st.column_config.TextColumn("哈希", width=140),
+            "选择": st.column_config.CheckboxColumn("选择", width=70),
+            "扫描目标": st.column_config.TextColumn("扫描目标", width=420),
+            "时间": st.column_config.TextColumn("时间", width=160),
+            "结果": st.column_config.TextColumn("结果", width=140),
+            "哈希": st.column_config.TextColumn("哈希", width=120),
             "查看": st.column_config.ButtonColumn(
                 "查看",
                 on_click=_handle_history_action,
@@ -1191,6 +1226,11 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
         },
         key="history_table",
     )
+    current_selected = set(selected_dirs) - set(page_dirs)
+    for index, checked in enumerate(edited["选择"].tolist()):
+        if checked:
+            current_selected.add(page_dirs[index])
+    st.session_state["history_selected_dirs"] = list(current_selected)
     error = st.session_state.pop("history_action_error", None)
     if error:
         st.error(error)
