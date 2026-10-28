@@ -16,7 +16,7 @@ import yaml
 from matplotlib import font_manager
 
 from audit.agent import refresh_llm_client
-from audit.service import run_audit
+from audit.service import delete_project_baseline, run_audit
 from config import C
 from graph_atlas import cached_graph_html, cached_static_graph_html, select_visualization_nodes
 import base64
@@ -655,6 +655,10 @@ def render_analysis_page(workspace: Path):
                     enable_thinking=bool(st.session_state.get("enable_thinking", False)),
                     project_key=project_key,
                 )
+                (output_dir / "meta.json").write_text(
+                    json.dumps({"project_key": project_key}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
                 st.session_state.latest_result = result
                 st.session_state.audit_notice = {
                     "mode": result.get("mode", "全量审计"),
@@ -1060,11 +1064,18 @@ def _handle_history_action(session_key: str, action: str, tab_key: str = "result
     elif action == "delete":
         output_dir = Path(item["output_dir"])
         try:
+            project_key = ""
+            meta_path = output_dir / "meta.json"
+            if meta_path.exists():
+                project_key = json.loads(meta_path.read_text(encoding="utf-8")).get("project_key", "")
+            delete_project_baseline(project_key, item.get("graph_path") or "")
             if output_dir.exists():
                 shutil.rmtree(output_dir, ignore_errors=True)
             latest = st.session_state.get("latest_result")
             if latest and latest.get("output_dir") == str(output_dir):
                 st.session_state.latest_result = None
+                st.session_state.audit_notice = None
+                st.session_state.analysis_done = False
             if st.session_state.get(session_key) == item["label"]:
                 st.session_state[session_key] = None
             st.rerun()

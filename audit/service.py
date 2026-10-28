@@ -3,7 +3,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from collections import deque
+from pathlib import Path
 from typing import List
 
 import networkx as nx
@@ -375,6 +377,35 @@ def calculate_project_hash(root_dir) -> str:
 
 
 def _baseline_dir(project_key: str) -> str:
+    safe = re.sub(r"[^\w.-]+", "_", project_key or "project").strip("._") or "project"
+    path = os.path.join("output", "streamlit_runs", "baselines", safe)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def delete_project_baseline(project_key: str = "", graph_path: str = "") -> bool:
+    """删除增量基线。优先按项目标识，其次按图谱内容匹配。"""
+    root = os.path.join("output", "streamlit_runs", "baselines")
+    removed = False
+    if project_key:
+        safe = re.sub(r"[^\w.-]+", "_", project_key).strip("._") or "project"
+        base = os.path.join(root, safe)
+        if os.path.isdir(base):
+            shutil.rmtree(base, ignore_errors=True)
+            removed = True
+    if not os.path.isdir(root):
+        return removed
+    target_hash = ""
+    if graph_path and os.path.exists(graph_path):
+        target_hash = hashlib.sha256(Path(graph_path).read_bytes()).hexdigest()
+    for child in Path(root).iterdir():
+        baseline_graph = child / "graph.graphml"
+        if not baseline_graph.exists():
+            continue
+        if target_hash and hashlib.sha256(baseline_graph.read_bytes()).hexdigest() == target_hash:
+            shutil.rmtree(child, ignore_errors=True)
+            removed = True
+    return removed
     safe = re.sub(r"[^\w.-]+", "_", project_key or "project").strip("._") or "project"
     path = os.path.join("output", "streamlit_runs", "baselines", safe)
     os.makedirs(path, exist_ok=True)
