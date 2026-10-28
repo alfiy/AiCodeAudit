@@ -209,6 +209,18 @@ def select_visualization_nodes(graph: nx.DiGraph, sections: list[dict]) -> tuple
     return kept, {}, "项目源码", cleaned
 
 
+def _project_relative_path(path: str) -> str:
+    text = str(path or "").replace("\\", "/")
+    if not text:
+        return ""
+    parts = [part for part in text.split("/") if part]
+    if "extracted" in parts:
+        index = parts.index("extracted")
+        if len(parts) > index + 3:
+            return "/".join(parts[index + 3:])
+    return "/".join(parts[-4:])
+
+
 def _file_color(name: str) -> str:
     colors = ["#64748b", "#0ea5e9", "#8b5cf6", "#14b8a6", "#6366f1", "#84cc16", "#f59e0b", "#ec4899"]
     return colors[abs(hash(str(name or ""))) % len(colors)]
@@ -698,18 +710,23 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
         desc = str(attrs.get("desc") or "")
         if len(desc) > 180:
             desc = desc[:180] + "..."
+        full_label = str(attrs.get("source_name") or node_key)
+        if len(full_label) > 22:
+            full_label = full_label[:20] + "…"
         nodes.append({
             "id": node_key,
-            "label": attrs.get("source_name") or node_key,
+            "label": "",
+            "fullLabel": full_label,
             "title": (
                 f"文件: {attrs.get('name', '')}<br>"
-                f"路径: {attrs.get('path', '')}<br>"
+                f"路径: {_project_relative_path(attrs.get('path', ''))}<br>"
                 f"描述: {desc}<br>"
                 f"行号: {attrs.get('start_code_line', '')}-{attrs.get('end_code_line', '')}"
             ),
             "group": attrs.get("name", "default"),
             "shape": "dot",
-            "size": 22 if risks.get(node_key, "") else (16 if attrs.get("source_code") else 9),
+            "size": 5,
+            "scaling": {"min": 5, "max": 5, "label": {"enabled": False, "min": 11, "max": 11}},
             "x": x,
             "y": y,
             "fixed": True,
@@ -754,6 +771,16 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
       let edgesDS = null;
       let focusId = null;
       let started = false;
+      const lockVisualSize = () => {{
+        if (!nodesDS || !network) return;
+        const scale = Math.max(network.getScale(), 0.05);
+        nodesDS.update(DATA.nodes.map((node) => ({{
+          id: node.id,
+          size: 5 / scale,
+          font: {{ size: 11 / scale, color: "#1f2a44", face: "Microsoft YaHei" }},
+        }})));
+        edgesDS.update(DATA.edges.map((edge) => ({{ id: edge.id, width: 0.4 / scale }})));
+      }};
 
       const focusNode = (nodeId) => {{
         const related = [...new Set(neighbors[nodeId] || [])];
@@ -764,13 +791,13 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
           if (node.id === nodeId) {{
             return {{
               id: node.id,
-              label: node.label,
+              label: node.fullLabel || "",
               hidden: false,
               x: 0,
               y: 0,
               fixed: false,
-              size: 24,
-              font: {{ size: 16, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 3, strokeColor: "#ffffff" }},
+              size: 5,
+              font: {{ size: 11, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 2, strokeColor: "#ffffff" }},
             }};
           }}
           if (!keep.has(node.id)) return {{ id: node.id, hidden: true }};
@@ -778,12 +805,12 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
           const angle = (Math.PI * 2 * index) / Math.max(related.length, 1);
           return {{
             id: node.id,
-            label: node.label,
+            label: node.fullLabel || "",
             hidden: false,
             x: Math.round(Math.cos(angle) * radius),
             y: Math.round(Math.sin(angle) * radius),
             fixed: false,
-            font: {{ size: 14, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 3, strokeColor: "#ffffff" }},
+            font: {{ size: 11, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 2, strokeColor: "#ffffff" }},
           }};
         }});
         nodesDS.update(nodeUpdates);
@@ -797,7 +824,8 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
         }});
         backBtn.style.display = "inline-block";
         network.fit({{ animation: {{ duration: 250 }} }});
-        const label = nodeById[nodeId] ? nodeById[nodeId].label : nodeId;
+        lockVisualSize();
+        const label = nodeById[nodeId] ? (nodeById[nodeId].fullLabel || nodeId) : nodeId;
         status.innerText = "局部视图：" + label + "，直接相连 " + related.length + " 个。可缩放、拖动，返回全局后恢复。";
       }};
 
@@ -805,18 +833,19 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
         focusId = null;
         nodesDS.update(DATA.nodes.map((node) => ({{
           id: node.id,
-          label: node.label,
+          label: "",
           hidden: false,
           x: node.x,
           y: node.y,
           fixed: {{ x: true, y: true }},
-          size: node.size,
-          font: {{ size: 12, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 2, strokeColor: "#ffffff" }},
+          size: 5,
+          font: {{ size: 11, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 2, strokeColor: "#ffffff" }},
         }})));
         edgesDS.update(DATA.edges.map((edge) => ({{ id: edge.id, hidden: false, smooth: false }})));
         DATA.nodes.forEach((node) => network.moveNode(node.id, node.x, node.y));
         backBtn.style.display = "none";
         network.fit({{ animation: false }});
+        lockVisualSize();
         status.innerText = "已返回全局。可滚轮缩放，点击节点查看直接相连。";
       }};
 
@@ -829,7 +858,8 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
         started = true;
         nodesDS = new vis.DataSet(DATA.nodes.map((node) => ({{
           ...node,
-          font: {{ size: 12, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 2, strokeColor: "#ffffff" }},
+          size: 5,
+          font: {{ size: 11, color: "#1f2a44", face: "Microsoft YaHei", strokeWidth: 2, strokeColor: "#ffffff" }},
         }})));
         edgesDS = new vis.DataSet(DATA.edges);
         network = new vis.Network(document.getElementById("graph"), {{ nodes: nodesDS, edges: edgesDS }}, {{
@@ -839,15 +869,60 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
           layout: {{ improvedLayout: false }},
           nodes: {{
             borderWidth: 1,
-            scaling: {{ label: {{ enabled: false }} }},
-            font: {{ color: "#1f2a44", size: 12, face: "Microsoft YaHei" }}
+            size: 5,
+            scaling: {{ min: 5, max: 5, label: {{ enabled: false, min: 11, max: 11 }} }},
+            font: {{ color: "#1f2a44", size: 11, face: "Microsoft YaHei" }}
           }},
           edges: {{
+            width: 0.4,
+            hoverWidth: 0,
+            selectionWidth: 0,
             color: {{ color: "#94a3b8", highlight: "#f97316" }},
             smooth: false
           }}
         }});
         network.fit({{ animation: false }});
+        network.on("zoom", lockVisualSize);
+        lockVisualSize();
+        let hoverId = null;
+        const nearestNode = (domPoint) => {{
+          if (!domPoint || !network) return null;
+          const positions = network.getPositions();
+          let best = null;
+          let bestDist = 22;
+          Object.keys(positions).forEach((id) => {{
+            const node = nodesDS.get(id);
+            if (!node || node.hidden) return;
+            const dom = network.canvasToDOM(positions[id]);
+            const dist = Math.hypot(dom.x - domPoint.x, dom.y - domPoint.y);
+            if (dist < bestDist) {{
+              bestDist = dist;
+              best = id;
+            }}
+          }});
+          return best;
+        }};
+        const showHoverLabel = (nodeId) => {{
+          if (hoverId === nodeId) return;
+          const previous = hoverId;
+          hoverId = nodeId;
+          const updates = [];
+          if (previous) updates.push({{ id: previous, label: "" }});
+          if (nodeId) updates.push({{ id: nodeId, label: nodeById[nodeId].fullLabel || "" }});
+          if (updates.length) nodesDS.update(updates);
+        }};
+        const canvas = document.getElementById("graph").querySelector("canvas");
+        const pointerOf = (event) => {{
+          const rect = canvas.getBoundingClientRect();
+          return {{ x: event.clientX - rect.left, y: event.clientY - rect.top }};
+        }};
+        canvas.addEventListener("mousemove", (event) => {{
+          if (focusId) return;
+          showHoverLabel(nearestNode(pointerOf(event)));
+        }});
+        canvas.addEventListener("mouseleave", () => {{
+          if (!focusId) showHoverLabel(null);
+        }});
         network.on("click", (params) => {{
           if (!params.nodes.length) return;
           focusNode(params.nodes[0]);
@@ -862,7 +937,7 @@ def build_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, r
 
 def cached_static_graph_html(graph_path: str, keep_ids: set[str] | None = None, risks: dict[str, str] | None = None, resolved: nx.DiGraph | None = None) -> Path:
     source = Path(graph_path)
-    signature = hashlib.sha1(("v4|" + ",".join(sorted(keep_ids or []))).encode("utf-8")).hexdigest()[:10]
+    signature = hashlib.sha1(("v21-static-focus-label|" + ",".join(sorted(keep_ids or []))).encode("utf-8")).hexdigest()[:10]
     html_path = source.parent / f"_graph_static_focus_{signature}.html"
     if html_path.exists() and html_path.stat().st_mtime >= source.stat().st_mtime:
         return html_path

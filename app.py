@@ -572,12 +572,33 @@ def build_node_dataframe(graph: nx.DiGraph):
     return pd.DataFrame(rows)
 
 
+def _project_relative_path(path: str) -> str:
+    text = str(path or "").replace("\\", "/")
+    if not text:
+        return ""
+    parts = [part for part in text.split("/") if part]
+    if "extracted" in parts:
+        index = parts.index("extracted")
+        # extracted/<run>/<project>/... -> 项目内相对路径
+        if len(parts) > index + 3:
+            return "/".join(parts[index + 3:])
+    return "/".join(parts[-4:])
+
+
+def _relative_node_id(node_id: str) -> str:
+    text = str(node_id or "")
+    if "|" in text:
+        left, right = text.rsplit("|", 1)
+        return f"{_project_relative_path(left)}|{right}"
+    return _project_relative_path(text) or text
+
+
 def build_edge_dataframe(graph: nx.DiGraph):
     rows = []
     for source, target in graph.edges():
         rows.append({
-            "源节点": str(source),
-            "目标节点": str(target),
+            "源节点": _relative_node_id(source),
+            "目标节点": _relative_node_id(target),
         })
     return pd.DataFrame(rows)
 
@@ -1385,6 +1406,7 @@ def render_graph_page(workspace: Path):
             },
         )
     else:
+        st.caption("源节点和目标节点已改为项目相对路径。")
         st.dataframe(build_edge_dataframe(view_graph), width="stretch", height=520)
 
 
