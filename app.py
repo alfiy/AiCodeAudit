@@ -615,6 +615,8 @@ def _render_audit_notice() -> None:
     changed = notice.get("changed", 0)
     if mode == "未变更，复用上次结果":
         st.warning("源码无更新，已复用上次审计结果，无需重新分析。")
+    elif mode == "强制全量审计":
+        st.success("已按重新分析要求，强制全量扫描完成。")
     elif mode == "增量审计":
         st.success(f"增量分析完成，本次重点审计了 {changed} 个变更文件。")
     else:
@@ -655,18 +657,23 @@ def render_analysis_page(workspace: Path):
     clicked = st.button(button_label, type="primary", width="stretch", disabled=analyzing)
 
     if clicked and not analyzing:
+        st.session_state.force_full_audit = analysis_done
         st.session_state.analyzing = True
         st.rerun()
 
     if analyzing:
         zip_path = save_uploaded_zip(uploaded_file, subdirs["uploads"])
+        force_full = bool(st.session_state.get("force_full_audit", False))
         try:
             with st.status("正在解压并分析项目...", expanded=True) as status:
                 st.write("保存上传文件")
                 run_root, project_dir = extract_zip(zip_path, subdirs["extracted"])
                 st.write(f"解压完成: `{project_dir}`")
                 project_key = sanitize_name(Path(uploaded_file.name).stem)
-                st.write(f"项目标识: `{project_key}`，将按文件 MD5 判断是否增量审计")
+                if force_full:
+                    st.write(f"项目标识: `{project_key}`，本次点击重新分析，强制全量扫描")
+                else:
+                    st.write(f"项目标识: `{project_key}`，将按文件 MD5 判断是否增量审计")
 
                 batch_name = f"{sanitize_name(project_dir.name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 output_dir = subdirs["results"] / batch_name
@@ -677,6 +684,7 @@ def render_analysis_page(workspace: Path):
                     batch_size=st.session_state.batch_size,
                     enable_thinking=bool(st.session_state.get("enable_thinking", False)),
                     project_key=project_key,
+                    force=force_full,
                 )
                 (output_dir / "meta.json").write_text(
                     json.dumps({"project_key": project_key}, ensure_ascii=False),
@@ -699,6 +707,7 @@ def render_analysis_page(workspace: Path):
             st.exception(exc)
         finally:
             st.session_state.analyzing = False
+            st.session_state.force_full_audit = False
             if not st.session_state.keep_files:
                 if zip_path.exists():
                     zip_path.unlink()

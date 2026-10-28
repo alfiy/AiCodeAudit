@@ -966,17 +966,17 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
     )
 
 
-def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_thinking: bool = False, project_key: str = ""):
+def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_thinking: bool = False, project_key: str = "", force: bool = False):
     from audit.agent import set_thinking_enabled
     set_thinking_enabled(False)
-    logger.info("本次审计思考模式: {}", "开启" if enable_thinking else "关闭")
+    logger.info("本次审计思考模式: {}，强制全量: {}", "开启" if enable_thinking else "关闭", force)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
     root_dir = scan_project_struct(project_dir)
     project_hash = calculate_project_hash(root_dir)
     file_hashes = _file_md5_map(root_dir)
-    baseline = _load_baseline(project_key) if project_key else None
+    baseline = None if force else (_load_baseline(project_key) if project_key else None)
     added, modified, deleted = _diff_files(baseline.get("files", {}) if baseline else {}, file_hashes)
     changed = added | modified | deleted
     logger.info("扫描完成，项目内容哈希: {}，变更文件: {}", project_hash, len(changed))
@@ -1056,6 +1056,6 @@ def run_audit(project_dir: str, output_dir: str, batch_size: int = 10, enable_th
         "output_dir": output_dir,
         "incremental": incremental,
         "changed_files": len(changed),
-        "mode": "增量审计" if incremental else "全量审计",
+        "mode": "强制全量审计" if force else ("增量审计" if incremental else "全量审计"),
     }
 
