@@ -118,6 +118,8 @@ def get_finding_badge_class(finding_type: str) -> str:
 
 
 def get_finding_level_label(finding_type: str) -> str:
+    if is_pass_finding({"type": finding_type}):
+        return "通过"
     badge_class = get_finding_badge_class(finding_type)
     return {
         "high": "高危",
@@ -397,11 +399,11 @@ def parse_structured_report_section(section: str):
 
     if "<结论>审计通过</结论>" in section:
         return [{
-            "file_path": "当前审计上下文",
+            "file_path": "未定位到具体文件",
             "findings": [{
                 "type": "审计通过",
                 "location": "-",
-                "feature": "当前上下文未识别到明确漏洞",
+                "feature": "该审计任务未识别到明确漏洞，但报告中没有保留具体文件路径",
                 "vector": "",
                 "impact": "",
                 "fix": "",
@@ -1093,7 +1095,7 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
     page_size = 10
     page_key = "history_scan_page"
     st.markdown('<div class="filter-gap"></div>', unsafe_allow_html=True)
-    tool_cols = st.columns([2.6, 1.8, 1.0])
+    tool_cols = st.columns([2.6, 1.8])
     with tool_cols[0]:
         keyword = st.text_input("搜索", placeholder="请输入关键词搜索", label_visibility="collapsed", key="history_keyword")
     with tool_cols[1]:
@@ -1104,8 +1106,6 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
             label_visibility="collapsed",
             key="history_levels",
         )
-    with tool_cols[2]:
-        show_passed = st.toggle("显示通过", value=False, key="history_show_passed")
 
     filtered = []
     needle = (keyword or "").strip().lower()
@@ -1122,11 +1122,9 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
         has_selected_risk = bool(risk_levels.intersection(selected_levels))
         if risk_count and not has_selected_risk:
             continue
-        if not risk_count and not show_passed:
-            continue
         filtered.append((item, risk_count, pass_count))
 
-    filter_sig = f"{needle}|{tuple(selected_levels)}|{show_passed}|{len(filtered)}"
+    filter_sig = f"{needle}|{tuple(selected_levels)}|{len(filtered)}"
     if st.session_state.get("history_filter_sig") != filter_sig:
         st.session_state["history_filter_sig"] = filter_sig
         st.session_state[page_key] = 1
@@ -1171,8 +1169,6 @@ def _render_history_table(results: list[dict], session_key: str, tab_key: str = 
                 _delete_history_item(item, session_key)
             st.session_state["history_selected_dirs"] = []
             st.rerun()
-    if show_passed and not any(pass_count for _, _, pass_count in filtered):
-        st.caption("已打开“显示通过”。当前历史报告里没有保存审计通过记录，所以列表没有新增条目。重新审计后才会出现。")
 
     rows = []
     for item, risk_count, pass_count in page_results:

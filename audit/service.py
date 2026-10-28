@@ -809,6 +809,24 @@ def _extract_payload_file(payload: str) -> str:
     return "unknown"
 
 
+def _format_pass_report(payload: str) -> str:
+    path = _extract_payload_file(payload)
+    if not path or path == "unknown":
+        path = "未定位到具体文件"
+    return (
+        "<审计报告>\n"
+        "<文件>\n"
+        f"路径: {path}\n"
+        "结论: 审计通过\n"
+        "</文件>\n"
+        "</审计报告>"
+    )
+    match = re.search(r"源码路径:([^\n]+)", payload)
+    if match:
+        return match.group(1).strip()
+    return "unknown"
+
+
 def _select_diverse_payloads(candidates: list[dict], max_payloads: int, max_per_file: int) -> list[dict]:
     selected = []
     file_counts = {}
@@ -894,7 +912,7 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
     for batch in tqdm(batches, total=len(batches), desc="Agent_2 执行中..."):
         tasks = [asyncio.create_task(agent_2(payload)) for payload in batch]
         result_list = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in result_list:
+        for payload, result in zip(batch, result_list):
             if isinstance(result, Exception):
                 failed_count += 1
                 logger.warning("Agent_2 任务失败并已隔离: {}", result)
@@ -904,7 +922,7 @@ async def async_run_agent_2(graph: nx.DiGraph, out_file, batch_size=10):
             normalized = normalize_report_text(result)
             if is_pass_only_report(normalized):
                 filtered_pass_count += 1
-                passed_reports.append(normalized)
+                passed_reports.append(_format_pass_report(payload))
                 continue
             reports.append(normalized)
         reports = _dedupe_reports(reports)
